@@ -239,5 +239,5 @@ def match_ipod_tracks(
             )
 
         if matched_track:
-            ep.ipod_dbid = matched_track.get("dbid", 0)
+            ep.ipod_dbid = matched_track.get("db_id", 0)
             ep.status = STATUS_ON_IPOD

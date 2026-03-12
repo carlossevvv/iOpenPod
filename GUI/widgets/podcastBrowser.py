@@ -126,7 +126,23 @@ class PodcastBrowser(QFrame):
         from PodcastManager.subscription_store import SubscriptionStore
         self._store = SubscriptionStore(ipod_path)
         self._store.load()
+        self._match_ipod_statuses()
         self._refresh_feed_list()
+
+    def _match_ipod_statuses(self) -> None:
+        """Reconcile episode statuses with what's actually on the iPod."""
+        if not self._store:
+            return
+        try:
+            from GUI.app import iTunesDBCache
+            from PodcastManager.podcast_sync import match_ipod_tracks
+            cache = iTunesDBCache.get_instance()
+            ipod_tracks = cache.get_tracks() or []
+            for feed in self._store.get_feeds():
+                match_ipod_tracks(feed, ipod_tracks)
+                self._store.update_feed(feed)
+        except Exception as e:
+            log.warning("Could not match podcast statuses: %s", e)
 
     def clear(self) -> None:
         """Reset all state (called on device change)."""
@@ -1067,7 +1083,7 @@ class PodcastBrowser(QFrame):
         except Exception:
             pass
 
-        tracks_by_dbid = {t.get("dbid", 0): t for t in ipod_tracks if t.get("dbid")}
+        tracks_by_dbid = {t.get("db_id", 0): t for t in ipod_tracks if t.get("db_id")}
 
         to_remove: list[SyncItem] = []
         bytes_to_remove = 0
@@ -1077,6 +1093,7 @@ class PodcastBrowser(QFrame):
                 continue
             to_remove.append(SyncItem(
                 action=SyncAction.REMOVE_FROM_IPOD,
+                dbid=ep.ipod_dbid,
                 ipod_track=ipod_track,
                 description=f"\U0001f399 {self._selected_feed.title} \u2014 {ep.title}",
             ))
