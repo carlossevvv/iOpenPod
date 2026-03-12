@@ -985,8 +985,10 @@ class MusicBrowserList(QFrame):
         """Scan rows for missing artwork and load in background batches."""
         from ..app import Worker, ThreadPoolSingleton
 
-        # Collect unique mhiiLinks that need loading
+        # Collect unique mhiiLinks that need loading, along with a db_id
+        # for each link so the batch loader can try high-res PC art first.
         links_to_load: set[int] = set()
+        link_to_dbid: dict[int, int] = {}
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             if item is None:
@@ -994,6 +996,11 @@ class MusicBrowserList(QFrame):
             link = item.data(Qt.ItemDataRole.UserRole)
             if link is not None and link not in self._art_cache and link not in self._art_pending:
                 links_to_load.add(link)
+                # Grab a db_id for this link from the track list (first match)
+                if link not in link_to_dbid and row < len(self._tracks):
+                    db_id = self._tracks[row].get("db_id")
+                    if db_id:
+                        link_to_dbid[link] = db_id
 
         if not links_to_load:
             return
@@ -1002,38 +1009,57 @@ class MusicBrowserList(QFrame):
         load_id = self._load_id
 
         # Load in a single background worker
-        worker = Worker(self._load_art_batch, list(links_to_load))
+        worker = Worker(self._load_art_batch, list(links_to_load), link_to_dbid)
         worker.signals.result.connect(
             lambda result, lid=load_id: self._on_art_loaded(result, lid))
         ThreadPoolSingleton.get_instance().start(worker)
 
-    def _load_art_batch(self, links: list[int]) -> dict[int, tuple[int, int, bytes] | None]:
+    def _load_art_batch(self, links: list[int], link_to_dbid: dict[int, int] | None = None) -> dict[int, tuple[int, int, bytes] | None]:
         """Background worker: decode artwork for a batch of mhiiLinks.
+
+        Prioritises high-res artwork from the PC source file (via the sync
+        mapping) and falls back to iPod ArtworkDB thumbnails.
 
         Returns dict mapping mhiiLink -> (width, height, rgba_bytes) or None.
         """
         from ..app import DeviceManager
-        from ..imgMaker import find_image_by_imgId, get_artworkdb_cached
+        from ..imgMaker import find_image_by_imgId, get_artworkdb_cached, extract_pc_art_image
         import os
 
         device = DeviceManager.get_instance()
         if not device.device_path:
             return {}
 
-        artworkdb_path = device.artworkdb_path
-        artwork_folder = device.artwork_folder_path
-        if not artworkdb_path or not os.path.exists(artworkdb_path):
-            return {}
-
-        artworkdb_data, imgid_index = get_artworkdb_cached(artworkdb_path)
         results: dict[int, tuple[int, int, bytes] | None] = {}
 
         for link in links:
             if device.cancellation_token.is_cancelled():
                 break
-            result = find_image_by_imgId(artworkdb_data, artwork_folder, link, imgid_index)
-            if result is not None:
-                pil_img, _dcol, _album_colors = result
+
+            pil_img = None
+
+            # Try high-res PC artwork first
+            if link_to_dbid:
+                db_id = link_to_dbid.get(link)
+                if db_id:
+                    try:
+                        pc_img = extract_pc_art_image(db_id, device.device_path)
+                        if pc_img is not None:
+                            pil_img = pc_img
+                    except Exception:
+                        pass
+
+            # Fall back to ArtworkDB
+            if pil_img is None:
+                artworkdb_path = device.artworkdb_path
+                artwork_folder = device.artwork_folder_path
+                if artworkdb_path and os.path.exists(artworkdb_path):
+                    artworkdb_data, imgid_index = get_artworkdb_cached(artworkdb_path)
+                    result = find_image_by_imgId(artworkdb_data, artwork_folder, link, imgid_index)
+                    if result is not None:
+                        pil_img, _dcol, _album_colors = result
+
+            if pil_img is not None:
                 pil_img = pil_img.convert("RGBA")
                 results[link] = (pil_img.width, pil_img.height, pil_img.tobytes("raw", "RGBA"))
             else:

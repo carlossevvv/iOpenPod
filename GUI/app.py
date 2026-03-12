@@ -954,6 +954,11 @@ def build_album_list(cache: iTunesDBCache) -> list:
 
         if track_count > 0:
             mhiiLink = matching_tracks[0].get("artwork_id_ref")
+            # Get db_id from first track with artwork (for high-res PC art lookup)
+            art_track_db_id = next(
+                (t.get("db_id") for t in matching_tracks if t.get("artwork_id_ref")),
+                matching_tracks[0].get("db_id"),
+            )
             # Get year from first track that has it
             year = next((t.get("year") for t in matching_tracks if t.get("year")), None)
             # Calculate total album duration
@@ -977,6 +982,7 @@ def build_album_list(cache: iTunesDBCache) -> list:
             "artist": artist,
             "year": year,
             "artwork_id_ref": mhiiLink,
+            "art_track_db_id": art_track_db_id if track_count > 0 else None,
             "category": "Albums",
             "filter_key": "Album",
             "filter_value": album,
@@ -999,6 +1005,10 @@ def build_artist_list(cache: iTunesDBCache) -> list:
         track_count = len(tracks)
         # Get first available artwork
         mhiiLink = next((t.get("artwork_id_ref") for t in tracks if t.get("artwork_id_ref")), None)
+        art_track_db_id = next(
+            (t.get("db_id") for t in tracks if t.get("artwork_id_ref")),
+            tracks[0].get("db_id") if tracks else None,
+        )
         # Count unique albums
         album_count = len(set(t.get("Album", "") for t in tracks))
         # Total plays
@@ -1017,6 +1027,7 @@ def build_artist_list(cache: iTunesDBCache) -> list:
             "title": artist,
             "subtitle": subtitle,
             "artwork_id_ref": mhiiLink,
+            "art_track_db_id": art_track_db_id,
             "category": "Artists",
             "filter_key": "Artist",
             "filter_value": artist,
@@ -1040,6 +1051,10 @@ def build_genre_list(cache: iTunesDBCache) -> list:
         track_count = len(tracks)
         # Get first available artwork
         mhiiLink = next((t.get("artwork_id_ref") for t in tracks if t.get("artwork_id_ref")), None)
+        art_track_db_id = next(
+            (t.get("db_id") for t in tracks if t.get("artwork_id_ref")),
+            tracks[0].get("db_id") if tracks else None,
+        )
         # Count unique artists
         artist_count = len(set(t.get("Artist", "") for t in tracks))
         # Total duration
@@ -1058,6 +1073,7 @@ def build_genre_list(cache: iTunesDBCache) -> list:
             "title": genre,
             "subtitle": " · ".join(subtitle_parts),
             "artwork_id_ref": mhiiLink,
+            "art_track_db_id": art_track_db_id,
             "category": "Genres",
             "filter_key": "Genre",
             "filter_value": genre,

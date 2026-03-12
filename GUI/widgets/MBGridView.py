@@ -177,6 +177,7 @@ class MusicBrowserGrid(QFrame):
                     "title": title,
                     "subtitle": subtitle,
                     "artwork_id_ref": mhiiLink,
+                    "art_track_db_id": item.get("art_track_db_id"),
                     "category": item.get("category", "Albums"),
                     "filter_key": item.get("filter_key", "Album"),
                     "filter_value": item.get("filter_value", title),

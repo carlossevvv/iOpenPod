@@ -2,7 +2,7 @@ import logging
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtWidgets import QLabel, QFrame, QVBoxLayout
 from PyQt6.QtGui import QFont, QPixmap, QCursor, QImage
-from ..imgMaker import find_image_by_imgId, get_artworkdb_cached
+from ..imgMaker import find_image_by_imgId, get_artworkdb_cached, extract_pc_art_image, getDominantColor, getAlbumColors
 from ..styles import Colors, FONT_FAMILY, Metrics, scaled
 from ..glyphs import glyph_pixmap
 from .scrollingLabel import ScrollingLabel
@@ -44,7 +44,7 @@ class MusicBrowserGridItem(QFrame):
         """)
         self.gridItemLayout.addWidget(self.img_label)
 
-        if mhiiLink is not None:
+        if mhiiLink is not None or (item_data and item_data.get("art_track_db_id")):
             self.loadImage()
         else:
             self._setPlaceholderImage()
@@ -123,7 +123,12 @@ class MusicBrowserGridItem(QFrame):
         ThreadPoolSingleton.get_instance().start(self.worker)
 
     def _loadImageData(self, mhiiLink):
-        """Load image data in worker thread."""
+        """Load image data in worker thread.
+
+        Prioritises high-res artwork from the PC source file (via the sync
+        mapping's source_path_hint) and falls back to the iPod's ArtworkDB
+        thumbnails when the PC file is unavailable.
+        """
         from ..app import DeviceManager
         import os
 
@@ -135,6 +140,22 @@ class MusicBrowserGridItem(QFrame):
         if not device.device_path:
             return None
 
+        # --- Try high-res PC artwork first ---
+        art_track_db_id = self.item_data.get("art_track_db_id")
+        if art_track_db_id:
+            try:
+                pc_img = extract_pc_art_image(art_track_db_id, device.device_path)
+                if pc_img is not None:
+                    dcol = getDominantColor(pc_img)
+                    album_colors = getAlbumColors(pc_img)
+                    return {"pil_image": pc_img, "dcol": dcol, "album_colors": album_colors}
+            except Exception:
+                pass  # Fall through to ArtworkDB
+
+        if device.cancellation_token.is_cancelled():
+            return None
+
+        # --- Fall back to iPod ArtworkDB thumbnails ---
         artworkdb_path = device.artworkdb_path
         artwork_folder = device.artwork_folder_path
 

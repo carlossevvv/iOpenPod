@@ -1,3 +1,4 @@
+import io
 import logging
 import os
 import threading
@@ -12,6 +13,15 @@ _artworkdb_cache = None
 _artworkdb_path_cache = None
 _imgid_index = None
 _cache_lock = threading.Lock()
+
+# Cache for mapping file (iOpenPod.json) used for PC art lookups
+_mapping_cache = None
+_mapping_device_path = None
+_mapping_lock = threading.Lock()
+
+# Cache for extracted PC artwork: source_path -> PIL.Image
+_pc_art_cache: dict[str, Image.Image | None] = {}
+_pc_art_cache_lock = threading.Lock()
 
 
 def _build_imgid_index(artworkdb_data):
@@ -42,10 +52,97 @@ def get_artworkdb_cached(artworkdb_path):
 def clear_artworkdb_cache():
     """Clear the cache when device changes."""
     global _artworkdb_cache, _artworkdb_path_cache, _imgid_index
+    global _mapping_cache, _mapping_device_path
     with _cache_lock:
         _artworkdb_cache = None
         _artworkdb_path_cache = None
         _imgid_index = None
+    with _mapping_lock:
+        _mapping_cache = None
+        _mapping_device_path = None
+    with _pc_art_cache_lock:
+        _pc_art_cache.clear()
+
+
+def _get_mapping_cached(device_path: str):
+    """Load and cache the iOpenPod.json mapping file for PC art lookups."""
+    global _mapping_cache, _mapping_device_path
+
+    with _mapping_lock:
+        if _mapping_cache is not None and _mapping_device_path == device_path:
+            return _mapping_cache
+
+        try:
+            from SyncEngine.mapping import MappingManager
+            manager = MappingManager(device_path)
+            if manager.exists():
+                _mapping_cache = manager.load()
+                _mapping_device_path = device_path
+                return _mapping_cache
+        except Exception as e:
+            logger.debug("Failed to load mapping file: %s", e)
+
+        _mapping_cache = None
+        _mapping_device_path = device_path
+        return None
+
+
+def extract_pc_art_image(db_id: int, device_path: str) -> Image.Image | None:
+    """Try to extract high-res artwork from the PC source file for a track.
+
+    Uses the mapping file's source_path_hint + the configured music folder
+    to locate the original PC audio file, then extracts its embedded art.
+
+    Returns a PIL Image or None if unavailable.
+    """
+    if not db_id or not device_path:
+        return None
+
+    mapping = _get_mapping_cached(device_path)
+    if mapping is None:
+        return None
+
+    result = mapping.get_by_dbid(db_id)
+    if result is None:
+        return None
+
+    _fp, track_mapping = result
+    source_hint = track_mapping.source_path_hint
+    if not source_hint:
+        return None
+
+    # Check PC art cache first
+    with _pc_art_cache_lock:
+        if source_hint in _pc_art_cache:
+            return _pc_art_cache[source_hint]
+
+    # Resolve absolute path: music_folder + source_path_hint
+    from GUI.settings import get_settings
+    settings = get_settings()
+    music_folder = settings.music_folder
+    if not music_folder:
+        return None
+
+    full_path = os.path.join(music_folder, source_hint)
+    if not os.path.isfile(full_path):
+        with _pc_art_cache_lock:
+            _pc_art_cache[source_hint] = None
+        return None
+
+    try:
+        from ArtworkDB_Writer.art_extractor import extract_art
+        art_bytes = extract_art(full_path)
+        if art_bytes:
+            img = Image.open(io.BytesIO(art_bytes)).convert("RGB")
+            with _pc_art_cache_lock:
+                _pc_art_cache[source_hint] = img
+            return img
+    except Exception as e:
+        logger.debug("Failed to extract PC art from %s: %s", full_path, e)
+
+    with _pc_art_cache_lock:
+        _pc_art_cache[source_hint] = None
+    return None
 
 
 def rgb565_to_rgb888_vectorized(pixels):
