@@ -779,7 +779,7 @@ class PlaylistBrowser(QFrame):
         self._switchToBrowse()
         self.listPanel.clear()
         self.infoCard.showEmpty()
-        self.trackList.clearTable()
+        self.trackList.clearTable(clear_cache=True)
         self.trackTitleBar.setTitle("Select a playlist")
         self.trackTitleBar.resetColor()
         self._current_playlist = None

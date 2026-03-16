@@ -491,6 +491,9 @@ class Sidebar(QFrame):
 
     def __init__(self):
         super().__init__()
+        self._video_capabilities_visible = True
+        self._podcast_capabilities_visible = True
+
         self.setStyleSheet(f"""
             QFrame#sidebar {{
                 background-color: {Colors.SURFACE};
@@ -646,8 +649,17 @@ class Sidebar(QFrame):
 
     def setLibraryTabsVisible(self, visible: bool):
         """Show or hide all library category tabs."""
-        for btn in self.buttons.values():
-            btn.setVisible(visible)
+        for label, btn in self.buttons.items():
+            if visible:
+                if label in self._VIDEO_CATEGORIES and not self._video_capabilities_visible:
+                    btn.setVisible(False)
+                elif label in self._PODCAST_CATEGORIES and not self._podcast_capabilities_visible:
+                    btn.setVisible(False)
+                else:
+                    btn.setVisible(True)
+            else:
+                btn.setVisible(False)
+
         if visible and self.selectedCategory not in self.buttons:
             self.selectCategory("Albums")
 
@@ -658,6 +670,7 @@ class Sidebar(QFrame):
         that don't support video (e.g. Mini, Nano 1G/2G, Shuffle, iPod 1G-4G).
         If the currently selected category is being hidden, switch to Albums.
         """
+        self._video_capabilities_visible = visible
         for cat in self._VIDEO_CATEGORIES:
             btn = self.buttons.get(cat)
             if btn:
@@ -672,6 +685,7 @@ class Sidebar(QFrame):
         Called after device identification to hide podcasts on iPods
         that don't support them (pre-5G, Shuffle).
         """
+        self._podcast_capabilities_visible = visible
         for cat in self._PODCAST_CATEGORIES:
             btn = self.buttons.get(cat)
             if btn:

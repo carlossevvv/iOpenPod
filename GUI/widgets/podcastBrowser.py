@@ -149,6 +149,9 @@ class PodcastBrowser(QFrame):
 
     def clear(self) -> None:
         """Reset all state (called on device change)."""
+        global _artwork_cache
+        _artwork_cache.clear()
+
         self._store = None
         self._selected_feed = None
         self._deferred_reconcile_tracks = None

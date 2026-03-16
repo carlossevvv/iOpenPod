@@ -455,6 +455,7 @@ def _cmd_alac(ffmpeg: str, src: str, dst: str) -> list[str]:
         *ar_args,
         "-sample_fmt", "s16p",
         "-ac", str(IPOD_MAX_CHANNELS),
+        "-movflags", "+faststart",
         "-y", dst,
     ]
 
@@ -474,6 +475,7 @@ def _cmd_aac(ffmpeg: str, src: str, dst: str, quality: str) -> list[str]:
         *ar_args,
         "-ac", str(IPOD_MAX_CHANNELS),
         *_aac_quality_args(quality),
+        "-movflags", "+faststart",
         "-y", dst,
     ]
 

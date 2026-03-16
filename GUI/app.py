@@ -248,11 +248,10 @@ class MainWindow(QMainWindow):
         thread_pool = ThreadPoolSingleton.get_instance()
         thread_pool.clear()
 
-        self.musicBrowser.browserGrid.clearGrid()
-        self.musicBrowser.browserTrack.clearTable()
-
         from .imgMaker import clear_artworkdb_cache
         clear_artworkdb_cache()
+
+        self.musicBrowser.reloadData()
 
         if path:
             self._show_default_page()
@@ -305,6 +304,7 @@ class MainWindow(QMainWindow):
             audiobooks=len(classified["audiobook"]),
         )
         self._update_sidebar_visibility(classified)
+        self.musicBrowser.browserTrack.clearTable(clear_cache=True)
         self._update_podcast_statuses()
         self.musicBrowser.onDataReady()
 
@@ -762,8 +762,7 @@ class MainWindow(QMainWindow):
         clear_artworkdb_cache()
 
         # Clear UI so the reload starts from a clean slate
-        self.musicBrowser.browserGrid.clearGrid()
-        self.musicBrowser.browserTrack.clearTable()
+        self.musicBrowser.reloadData()
 
         cache.start_loading()
 

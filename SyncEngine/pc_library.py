@@ -642,18 +642,15 @@ class PCLibrary:
         is_video = ext in VIDEO_EXTENSIONS
 
         # Try to open with mutagen
-        if mutagen is None:
-            return None
-        try:
-            audio = mutagen.File(file_path)  # type: ignore[union-attr]
-            if audio is None:
-                return None
-        except Exception as e:
-            logging.debug(f"mutagen failed on {file_path}: {e}")
-            return None
+        audio = None
+        if mutagen is not None:
+            try:
+                audio = mutagen.File(file_path)  # type: ignore[union-attr]
+            except Exception as e:
+                logging.debug(f"mutagen failed on {file_path}: {e}")
 
         # Extract metadata based on file type
-        metadata = self._extract_metadata(audio, ext)
+        metadata = self._extract_metadata(audio, ext, file_path)
 
         # Extract art hash for artwork change detection
         art_hash = self._compute_art_hash(file_path)
@@ -764,9 +761,61 @@ class PCLibrary:
             logging.debug(f"Could not extract art from {file_path}: {e}")
         return None
 
-    def _extract_metadata(self, audio, ext: str) -> dict:
-        """Extract metadata from mutagen object."""
+    def _extract_metadata(self, audio, ext: str, file_path: Path | None = None) -> dict:
+        """Extract metadata from mutagen object or fallback to ffprobe."""
         metadata: dict = {}
+
+        if audio is None:
+            # Fallback to ffprobe for files mutagen can't read (like .mkv, .avi)
+            if file_path:
+                try:
+                    import json
+                    from subprocess import check_output
+                    cmd = [
+                        "ffprobe",
+                        "-v", "quiet",
+                        "-print_format", "json",
+                        "-show_format",
+                        str(file_path)
+                    ]
+                    output = check_output(cmd, encoding='utf-8')
+                    info = json.loads(output)
+                    format_info = info.get("format", {})
+
+                    if "duration" in format_info:
+                        metadata["duration_ms"] = int(float(format_info["duration"]) * 1000)
+                    if "bit_rate" in format_info:
+                        metadata["bitrate"] = int(format_info["bit_rate"]) // 1000
+
+                    tags = format_info.get("tags", {})
+                    # Map standard ffprobe tags to our metadata format
+                    tag_map = {
+                        "title": "title",
+                        "artist": "artist",
+                        "album": "album",
+                        "album_artist": "album_artist",
+                        "genre": "genre",
+                        "date": "year",
+                        "comment": "comment",
+                        "composer": "composer"
+                    }
+                    for f_tag, m_key in tag_map.items():
+                        # tag names are case-insensitive in ffprobe json usually, but we check lower
+                        for k, v in tags.items():
+                            if k.lower() == f_tag:
+                                metadata[m_key] = v
+                                break
+
+                    # Try to parse track/disc numbers if present
+                    if "track" in tags:
+                        tr_info = self._parse_track_number(tags["track"])
+                        metadata.update(tr_info)
+                    if "disc" in tags:
+                        disc_info = self._parse_disc_number(tags["disc"])
+                        metadata.update(disc_info)
+                except Exception as e:
+                    logging.debug(f"ffprobe fallback failed for {file_path}: {e}")
+            return metadata
 
         # Duration (always available from audio info)
         if hasattr(audio, "info") and audio.info:

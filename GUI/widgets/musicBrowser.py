@@ -110,7 +110,7 @@ class MusicBrowser(QFrame):
     def reloadData(self):
         """Reload data from the current device."""
         self.browserGrid.clearGrid()
-        self.browserTrack.clearTable()
+        self.browserTrack.clearTable(clear_cache=True)
         self.playlistBrowser.clear()
         self.podcastBrowser.clear()
         # Data will be loaded when cache emits data_ready

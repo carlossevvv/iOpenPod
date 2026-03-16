@@ -2012,7 +2012,7 @@ class SyncExecutor:
             info = PlaylistInfo(
                 name=pl.get("Title", "Untitled"),
                 playlist_id=pl.get("playlist_id"),
-                master=bool(pl.get("master_flag", 0)),
+                master=bool(pl.get("master_flag", 0)),  # Respect the original master flag
                 sortorder=pl.get("sort_order", 0),
                 mhsd5_type=pl.get("mhsd5_type", 0),
                 raw_mhod100=self._decode_raw_blob(pl.get("playlist_prefs")),
@@ -2027,9 +2027,10 @@ class SyncExecutor:
                 )
 
                 if info.mhsd5_type:
-                    logger.debug("SPL (ds5) '%s': %d tracks would match "
-                                 "(iPod evaluates at runtime)",
-                                 info.name, len(matched_db_ids))
+                    info.track_ids = [d for d in matched_db_ids if d in valid_db_ids]
+                    info.item_metadata = None
+                    logger.debug("SPL (ds5) '%s': %d tracks matched and assigned",
+                                 info.name, len(info.track_ids))
                 elif info.smart_prefs.live_update:
                     info.track_ids = [d for d in matched_db_ids if d in valid_db_ids]
                     info.item_metadata = None
