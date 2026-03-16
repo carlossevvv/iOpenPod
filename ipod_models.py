@@ -234,6 +234,19 @@ class DeviceCapabilities:
     the device downscales to fit its screen."""
     max_video_height: int = 0
     """Maximum H.264 decode height (pixels).  0 = no video support."""
+    max_video_fps: int = 30
+    """Maximum frame rate for H.264 decode (fps).  All video-capable iPods
+    support 30 fps; PAL-resolution Nano 7G content is typically 25 fps but
+    30 fps playback is still supported."""
+    max_video_bitrate: int = 0
+    """Hard bitrate ceiling for H.264 decode (kbps).  0 = no explicit cap
+    (quality-controlled by CRF only).  Non-zero values enforce a -maxrate
+    flag in ffmpeg.
+    Nano 3G/4G use Baseline Profile Level 1.3, capped at 768 kbps by spec."""
+    h264_level: str = "3.0"
+    """H.264 Baseline Profile level to target when encoding video.
+    Most iPods support Level 3.0.  iPod Classic supports 3.1.
+    Nano 3G/4G are limited to Level 1.3 by their hardware decoder."""
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -473,6 +486,7 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
     ),
 
     # ── iPod Classic (all gens): HASH58, gapless, video ───────────────
+    # H.264 Baseline Profile Level 3.1: up to 5 Mbps, 640×480@30fps
     ("iPod Classic", "1st Gen"): DeviceCapabilities(
         checksum=ChecksumType.HASH58,
         supports_video=True,
@@ -486,6 +500,7 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
         db_version=0x30,
         max_video_width=640,
         max_video_height=480,
+        h264_level="3.1",
     ),
     ("iPod Classic", "2nd Gen"): DeviceCapabilities(
         checksum=ChecksumType.HASH58,
@@ -500,6 +515,7 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
         db_version=0x30,
         max_video_width=640,
         max_video_height=480,
+        h264_level="3.1",
     ),
     ("iPod Classic", "3rd Gen"): DeviceCapabilities(
         checksum=ChecksumType.HASH58,
@@ -514,6 +530,7 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
         db_version=0x30,
         max_video_width=640,
         max_video_height=480,
+        h264_level="3.1",
     ),
 
     # ── iPod Mini (no artwork, no video) ──────────────────────────────
@@ -545,6 +562,7 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
     ),
 
     # ── iPod Nano 3G ("Fat"): first Nano with video, HASH58 ──────────
+    # H.264 Baseline Profile Level 1.3: 768 kbps max, 320×240
     ("iPod Nano", "3rd Gen"): DeviceCapabilities(
         checksum=ChecksumType.HASH58,
         supports_video=True,
@@ -557,9 +575,12 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
         db_version=0x30,
         max_video_width=320,
         max_video_height=240,
+        max_video_bitrate=768,
+        h264_level="1.3",
     ),
 
     # ── iPod Nano 4G: HASH58, rotated artwork (RGB565_LE_90) ─────────
+    # H.264 Baseline Profile Level 1.3: 768 kbps max, 480×320
     ("iPod Nano", "4th Gen"): DeviceCapabilities(
         checksum=ChecksumType.HASH58,
         supports_video=True,
@@ -573,6 +594,8 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
         db_version=0x30,
         max_video_width=480,
         max_video_height=320,
+        max_video_bitrate=768,
+        h264_level="1.3",
     ),
 
     # ── iPod Nano 5G: HASH72, camera, compressed DB ──────────────────

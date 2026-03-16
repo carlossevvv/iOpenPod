@@ -171,3 +171,7 @@ cython_debug/
 
 # GitHub Copilot
 .github/copilot-instructions.md
+
+# Claude Code
+.claude/
+CLAUDE.md

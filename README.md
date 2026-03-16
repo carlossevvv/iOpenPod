@@ -5,8 +5,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: Win | Mac | Linux](https://img.shields.io/badge/Platform-Win%20%7C%20Mac%20%7C%20Linux-lightgrey.svg)](#download)
 [![GitHub Release](https://img.shields.io/github/v/release/TheRealSavi/iOpenPod)](https://github.com/TheRealSavi/iOpenPod/releases/latest)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/9Yy499Tf5d)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/U7U61W4PK1)
 
-iOpenPod is a free, open-source desktop app that lets you manage your iPod without iTunes. Plug in your iPod, pick your music folder, and sync — FLAC, OGG, MP3, whatever you've got. It handles the conversion, the artwork, the playlists, all of it. Works on Windows, macOS, and Linux.
+iOpenPod is a free, open-source desktop app that lets you manage your iPod without iTunes. Plug in your iPod, and sync. FLAC, OGG, MP3, any file format, it automatically handles the conversion. Access to all the features your iPod makes possible. Works on Windows, macOS, and Linux.
 
 ![Album Browser](assets/screenshots/hero.png)
 
@@ -14,28 +16,28 @@ iOpenPod is a free, open-source desktop app that lets you manage your iPod witho
 
 ## Download
 
-Grab the latest release for your platform — no Python required, no setup wizards, just download, extract, and run:
+Grab the latest release for your platform. No Python required, no setup wizards, just download, extract, and run:
 
-### ➡️ [Download iOpenPod](https://github.com/TheRealSavi/iOpenPod/releases/latest)
+### ➡️ [Download iOpenPod here](https://github.com/TheRealSavi/iOpenPod/releases/latest)
 
 | Platform | File | Instructions |
 |----------|------|-------------|
-| **Windows** | `iOpenPod-windows.zip` | Extract the zip, run `iOpenPod.exe` |
-| **macOS** | `iOpenPod-macos.tar.gz` | Extract, right-click `iOpenPod.app` → Open |
-| **Linux** | `iOpenPod-linux.tar.gz` | Extract, run `./iOpenPod` |
+| **Windows** | `iOpenPod-windows.zip` | Extract, and run `iOpenPod.exe` |
+| **macOS** | `iOpenPod-macos.tar.gz` | Extract, and run `iOpenPod.app`, you will need to allow the unknown developer in System Settings. |
+| **Linux** | `iOpenPod-linux.tar.gz` | Extract, and run `./iOpenPod` |
 
-Once installed, iOpenPod checks for updates automatically and can update itself right from the app.
+Once installed, iOpenPod can check for updates automatically and can update itself right from the app.
 
-> **Optional extras:** Install [FFmpeg](https://ffmpeg.org/) for transcoding (FLAC → ALAC, etc.) and [Chromaprint](https://acoustid.org/chromaprint) for acoustic fingerprinting.
+> **Optional extras:** Install [FFmpeg](https://ffmpeg.org/) for transcoding (FLAC to ALAC, etc.) and [Chromaprint](https://acoustid.org/chromaprint) for acoustic fingerprinting needed for syncing.
 
 ---
 
 ## How to Use
 
-1. **Plug in your iPod** — it mounts as a regular drive
-2. **Pick your device** — iOpenPod detects connected iPods automatically
-3. **Browse** — flip through albums, tracks, playlists, podcasts, and artwork
-4. **Sync** — choose your music folder, review what'll change, and hit go
+1. **Plug in your iPod** — Make sure it is mounted as a drive
+2. **Pick your device** — Select your iPod in iOpenPod. If it detects the iPod incorrectly, please open an issue.
+3. **Browse** — Manage your iPod's library, modifying any existing tracks, playlists, podcasts, etc.
+4. **Sync** — Press sync, choose a folder on your PC to sync, decide what you want and what you don't, and you're done.
 
 ![Device Picker](assets/screenshots/devicepicker.png)
 
@@ -44,32 +46,32 @@ Once installed, iOpenPod checks for updates automatically and can update itself 
 ## Features
 
 ### 🎵 Sync Music From Any Format
-Drop in FLAC, OGG, WMA, MP3, AAC — iOpenPod transcodes whatever the iPod can't play natively into ALAC or AAC. Converted files are cached so repeat syncs are fast.
+Drop in any file format and iOpenPod transcodes whatever the iPod can't play natively into ALAC or AAC. Converted files are cached so repeat syncs are fast.
 
 ### 📻 Podcasts
-Subscribe to podcasts right inside iOpenPod with the built-in podcast manager. Search, subscribe, download episodes, and sync them to your iPod — all without a separate app.
+Subscribe to podcasts right inside iOpenPod with the built-in podcast manager. Search, subscribe, download episodes, and sync them to your iPod.
 
 ![Podcasts](assets/screenshots/podcasts.png)
 
 ### 🎧 ListenBrainz Scrobbling
-Sign into ListenBrainz and your listening history gets scrobbled automatically every time you sync. Keep your music profile up to date without lifting a finger.
+Sign into ListenBrainz and your listening history gets scrobbled automatically every time you sync.
 
 ### 📚 More Than Just Music
 Audiobooks, movies, and TV shows are all supported. iOpenPod handles the different media types so your iPod sorts them correctly.
 
 ### 🖱️ Drag and Drop
-Don't care about keeping your PC and iPod perfectly in sync? Just drag files into the app and they'll land on your iPod — no sync setup required.
+Don't care about keeping your PC and iPod perfectly in sync? Just drag files into the app and they'll land on your iPod. No fingerprinting or file tracking.
 
 ![Manage Tracks](assets/screenshots/managetracks.png)
 
 ### 📊 Play Counts & Ratings
-Listen on your iPod, plug it in, and your play counts, ratings, and skip counts sync back to your PC library. You pick the conflict strategy.
+Listen on your iPod, plug it in, and your play counts, ratings, and skip counts can sync back to your PC library.
 
 ### 🖼️ Album Art Just Works
 Art gets extracted from your files, resized, and written in the iPod's native RGB565 format. No extra steps.
 
 ### ✅ Review Before You Commit
-Every sync shows you exactly what's happening — adds, removes, metadata updates — with checkboxes for each item. Nothing changes until you say so.
+Every sync shows you exactly what's happening, adds, removes, metadata updates, all with checkboxes for each item. Nothing changes until you say so.
 
 ![Sync Review](assets/screenshots/syncreview.png)
 
@@ -80,17 +82,12 @@ Browse and manage standard playlists. Smart playlists with rule-based filtering 
 ![Smart Playlists](assets/screenshots/smartplaylist.png)
 
 ### 🛡️ Backup & Rollback
-A snapshot of your iPod database is saved before every sync. If something goes wrong, roll back instantly with one click.
+A snapshot of your iPod database is saved before every sync. If something goes wrong, roll back to any previous state.
 
 ![Backups](assets/screenshots/backup.png)
 
-### 🌗 Light & Dark Mode
-Choose between dark and light themes. The UI scales properly on high-DPI and low-res monitors alike.
-
-![Light Mode](assets/screenshots/lightmode.png)
-
 ### ⚙️ Configurable
-Tweak transcoding settings, sync behavior, scrobbling, and more from the settings page.
+Tweak transcoding settings, sync behavior, and more.
 
 ---
 
@@ -113,7 +110,7 @@ Works with every click-wheel iPod Apple ever made. Shuffle support coming soon!
 
 ## For Developers
 
-Want to hack on iOpenPod? Here's how to get a dev environment running.
+Want to help make iOpenPod? Here's how to get a dev environment running.
 
 ### Prerequisites
 
@@ -138,10 +135,10 @@ That's it. `uv sync` installs all dependencies into a virtual environment automa
 ```
 iOpenPod/
 ├── GUI/                    # PyQt6 interface
-│   ├── app.py              # Main window, device management
+│   ├── app.py              # Main window
 │   └── widgets/            # Album grid, track list, sidebar, sync review, etc.
 ├── iTunesDB_Parser/        # Reads iPod's binary iTunesDB
-├── iTunesDB_Writer/        # Writes iTunesDB with hash/checksum support
+├── iTunesDB_Writer/        # Writes iTunesDB
 ├── ArtworkDB_Parser/       # Reads ArtworkDB binary format
 ├── ArtworkDB_Writer/       # Writes album art to .ithmb files
 ├── SyncEngine/             # Fingerprinting, diffing, transcoding, sync execution
@@ -163,11 +160,11 @@ The sync engine matches tracks between your PC and iPod using acoustic fingerpri
 
 ### Areas Where Help Is Needed
 
-- **Real hardware testing** — especially Nano 3G–5G models
-- **macOS and Linux testing** — primary dev is on Windows
-- **Bug reports** — open an issue with steps to reproduce
+- **Real hardware testing** - Every iPod is a little different.
+- **macOS and Linux testing** - Primary dev is on Windows
+- **Bug reports** - Open an issue with steps to reproduce
 
-Open an issue before starting major changes so we can coordinate.
+Please open an issue before starting major changes so we can coordinate, or [join the discord server](https://discord.gg/9Yy499Tf5d).
 
 ### Related Projects
 

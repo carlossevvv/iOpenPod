@@ -126,6 +126,8 @@ def compute_fingerprint(filepath: str | Path, fpcalc_path: Optional[str] = None)
             [fpcalc, "-raw", str(filepath)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=300,
             **_SP_KWARGS,
         )

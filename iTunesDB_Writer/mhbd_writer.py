@@ -252,22 +252,36 @@ def write_mhbd(
     mhli_data, artist_map, last_id = write_mhli(tracks, starting_index_for_artist_id=last_id + 1)
     mhsd_type8 = write_mhsd_type8(mhli_data)
 
-    # Assign album_id and artist_id to each track
+    # Build composer ID map (no dataset — composers don't have their own
+    # MHSD type, but the iPod firmware uses composer_id in mhit for
+    # grouping and sorting).
+    composer_map: dict[str, int] = {}  # lowercase composer → composer_id
+    composer_id = last_id + 1
+    for track in tracks:
+        composer_name = track.composer or ""
+        if not composer_name:
+            continue
+        key = composer_name.lower()
+        if key not in composer_map:
+            composer_map[key] = composer_id
+            composer_id += 1
+    last_id = composer_id - 1 if composer_map else last_id
+
+    # Assign album_id, artist_id, and composer_id to each track
     from .mhla_writer import _album_key
     for track in tracks:
         key = _album_key(track)
         track.album_id = album_map.get(key, 0)
 
-        # Artist ID from the artist list
+        # Artist ID from the artist list (artist_map is keyed by lowercase)
         artist_name = track.artist or ""
         if artist_name:
-            track.artist_id = artist_map.get(artist_name, 0)
+            track.artist_id = artist_map.get(artist_name.lower(), 0)
 
-        # Composer ID
-        # TODO: Implement composer list and IDs like albums/artists, and assign real composer_id here instead of 0.
+        # Composer ID from the composer map
         composer_name = track.composer or ""
         if composer_name:
-            track.composer_id = 0
+            track.composer_id = composer_map.get(composer_name.lower(), 0)
 
     # Build track list (Type 1 dataset)
     # This also returns next_track_id which tells us track IDs used

@@ -49,6 +49,13 @@ class MainWindow(QMainWindow):
         self._plan = None
         self._last_pc_folder = settings.music_folder or ""
 
+        # Quick metadata write (track flags, rating, etc.)
+        self._quick_meta_worker: _QuickMetadataWorker | None = None
+        self._quick_meta_timer = QTimer(self)
+        self._quick_meta_timer.setSingleShot(True)
+        self._quick_meta_timer.setInterval(1500)  # 1.5 s debounce
+        self._quick_meta_timer.timeout.connect(self._start_quick_meta_write)
+
         # Central widget with stacked layout for main/sync views
         self.centralStack = QStackedWidget()
         self.setCentralWidget(self.centralStack)
@@ -64,6 +71,9 @@ class MainWindow(QMainWindow):
 
         # Connect cache ready signal to refresh UI
         iTunesDBCache.get_instance().data_ready.connect(self.onDataReady)
+
+        # Schedule an immediate write whenever track flags are edited in the UI
+        iTunesDBCache.get_instance().tracks_changed.connect(self._schedule_quick_meta_write)
 
         # Restore last device path if it still looks like a real iPod
         if settings.last_device_path:
@@ -398,8 +408,76 @@ class MainWindow(QMainWindow):
             f"Failed to rename iPod:\n{error_msg}"
         )
 
+    # ── Quick metadata write (track flags, rating, etc.) ────────────────────
+
+    def _is_sync_running(self) -> bool:
+        return (
+            (self._sync_worker is not None and self._sync_worker.isRunning())
+            or (self._sync_execute_worker is not None and self._sync_execute_worker.isRunning())
+        )
+
+    def _schedule_quick_meta_write(self):
+        """Debounce-schedule a quick metadata write after track flags change."""
+        if self._is_sync_running():
+            # Full sync is running — edits will be included there; skip quick write.
+            return
+        device = DeviceManager.get_instance()
+        if not device.device_path:
+            return
+        self._quick_meta_timer.start()  # Resets the timer if already running
+
+    def _start_quick_meta_write(self):
+        """Launch the quick metadata worker (called by debounce timer)."""
+        if self._is_sync_running():
+            return
+        if self._quick_meta_worker is not None and self._quick_meta_worker.isRunning():
+            # Already saving — reschedule so the in-flight write finishes first
+            self._quick_meta_timer.start()
+            return
+
+        device = DeviceManager.get_instance()
+        if not device.device_path:
+            return
+
+        cache = iTunesDBCache.get_instance()
+        edits = cache.pop_track_edits()
+        if not edits:
+            return
+
+        logger.info("Quick metadata write: %d track(s) edited", len(edits))
+        self.sidebar.show_save_indicator("saving")
+
+        self._quick_meta_worker = _QuickMetadataWorker(device.device_path, edits)
+        self._quick_meta_worker.finished_ok.connect(self._on_quick_meta_ok)
+        self._quick_meta_worker.failed.connect(self._on_quick_meta_failed)
+        self._quick_meta_worker.start()
+
+    def _on_quick_meta_ok(self):
+        logger.info("Quick metadata write completed successfully")
+        self.sidebar.show_save_indicator("saved")
+
+    def _on_quick_meta_failed(self, error_msg: str):
+        logger.error("Quick metadata write failed: %s", error_msg)
+        self.sidebar.show_save_indicator("error")
+        # Re-queue edits: they were already popped, so the worker's snapshot is
+        # now lost.  Inform the user so they can re-edit or do a full sync.
+        QMessageBox.warning(
+            self, "Save Failed",
+            f"Could not save track changes to iPod:\n{error_msg}\n\n"
+            "Your edits are lost for this session. "
+            "You can re-apply them and sync again."
+        )
+
+    # ── End quick metadata write ─────────────────────────────────────────────
+
     def startPCSync(self):
         """Start the PC to iPod sync process."""
+        # If a quick metadata write is in progress, cancel the pending timer and
+        # wait briefly for the worker to finish so we don't race on the DB.
+        self._quick_meta_timer.stop()
+        if self._quick_meta_worker is not None and self._quick_meta_worker.isRunning():
+            self._quick_meta_worker.wait(5000)
+
         device = DeviceManager.get_instance()
         if not device.device_path:
             QMessageBox.warning(
@@ -1625,6 +1703,13 @@ class iTunesDBCache(QObject):
         with self._lock:
             self._track_edits.clear()
 
+    def pop_track_edits(self) -> "dict[int, dict[str, tuple]]":
+        """Atomically return and clear all pending track edits."""
+        with self._lock:
+            edits = dict(self._track_edits)
+            self._track_edits.clear()
+            return edits
+
     def set_data(self, data: dict, device_path: str):
         """Set cached data, build indexes, and emit ready signal."""
         # Build indexes for fast lookups
@@ -1939,6 +2024,80 @@ class _DeviceRenameWorker(QThread):
                 playlists=playlists,
                 smart_playlists=smart_playlists,
                 master_playlist_name=self._new_name,
+            )
+
+            if success:
+                self.finished_ok.emit()
+            else:
+                self.failed.emit("Database write returned False.")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.failed.emit(str(e))
+
+
+class _QuickMetadataWorker(QThread):
+    """Write pending track-flag edits directly to the iPod, bypassing full sync.
+
+    Reads the existing iTunesDB, applies the supplied ``track_edits`` snapshot
+    (db_id → {field: (orig, new)}), and writes the database back.  The worker
+    operates entirely on the snapshot passed at construction time; any edits
+    made after construction are not included and remain pending in the cache.
+    """
+
+    finished_ok = pyqtSignal()
+    failed = pyqtSignal(str)
+
+    def __init__(self, ipod_path: str, track_edits: "dict[int, dict[str, tuple]]"):
+        super().__init__()
+        self._ipod_path = ipod_path
+        self._track_edits = track_edits  # snapshot: db_id → {field: (orig, new)}
+
+    def run(self):
+        try:
+            from SyncEngine.sync_executor import SyncExecutor, _SyncContext
+            from SyncEngine.mapping import MappingFile
+
+            executor = SyncExecutor(self._ipod_path)
+            existing_db = executor._read_existing_database()
+            existing_tracks_data = existing_db["tracks"]
+            existing_playlists_raw = list(existing_db["playlists"])
+            existing_smart_raw = list(existing_db["smart_playlists"])
+
+            # Apply edits to the raw track dicts before converting to TrackInfo
+            for t in existing_tracks_data:
+                db_id = t.get("db_id", 0)
+                if db_id in self._track_edits:
+                    for field, (_, new_val) in self._track_edits[db_id].items():
+                        t[field] = new_val
+
+            all_tracks = [
+                executor._track_dict_to_info(t) for t in existing_tracks_data
+            ]
+
+            ctx = _SyncContext(
+                plan=None,  # type: ignore[arg-type]
+                mapping=MappingFile(),
+                progress_callback=None,
+                dry_run=False,
+                aac_quality="normal",
+                write_back_to_pc=False,
+                _is_cancelled=None,
+            )
+            ctx.existing_tracks_data = existing_tracks_data
+            ctx.existing_playlists_raw = existing_playlists_raw
+            ctx.existing_smart_raw = existing_smart_raw
+
+            master_name, playlists, smart_playlists = executor._build_and_evaluate_playlists(
+                ctx, all_tracks,
+            )
+
+            success = executor._write_database(
+                tracks=all_tracks,
+                playlists=playlists,
+                smart_playlists=smart_playlists,
+                master_playlist_name=master_name,
             )
 
             if success:

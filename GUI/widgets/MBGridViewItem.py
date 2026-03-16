@@ -40,7 +40,7 @@ class MusicBrowserGridItem(QFrame):
         self.img_label.setFixedSize(QSize(Metrics.GRID_ART_SIZE, Metrics.GRID_ART_SIZE))
         self.img_label.setStyleSheet(f"""
             border: none;
-            background: {Colors.SHADOW_LIGHT};
+            background: {Colors.SURFACE_ALT};
             border-radius: {Metrics.BORDER_RADIUS}px;
         """)
         self.gridItemLayout.addWidget(self.img_label)

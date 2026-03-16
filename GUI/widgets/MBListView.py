@@ -426,6 +426,8 @@ class MusicBrowserList(QFrame):
         self._status_label.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
         self._status_label.setStyleSheet(
             f"color: {Colors.TEXT_SECONDARY}; padding: 3px 8px;"
+            f" border-top: 1px solid {Colors.BORDER_SUBTLE};"
+            " background: transparent;"
         )
         self._layout.addWidget(self._status_label)
 

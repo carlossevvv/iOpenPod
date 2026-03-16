@@ -452,9 +452,18 @@ class SyncTrackRow(QFrame):
                 border-radius: {(3)}px;
                 background: transparent;
             }}
+            QCheckBox::indicator:hover {{
+                border-color: {accent};
+                background: transparent;
+            }}
             QCheckBox::indicator:checked {{
                 border-color: {accent};
                 background: {accent};
+            }}
+            QCheckBox::indicator:checked:hover {{
+                border-color: {accent};
+                background: {accent};
+                opacity: 0.85;
             }}
         """)
         self.cb.toggled.connect(self.toggled.emit)

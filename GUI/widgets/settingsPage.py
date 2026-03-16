@@ -16,8 +16,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QFont, QDesktopServices
 from pathlib import Path
 from ..styles import (
-    Colors, FONT_FAMILY, Metrics, btn_css, scrollbar_css,
+    Colors, FONT_FAMILY, Metrics, btn_css, danger_btn_css, scrollbar_css,
     sidebar_nav_css, sidebar_nav_selected_css,
+    input_css, combo_css, link_btn_css,
 )
 
 
@@ -85,12 +86,20 @@ class ToggleRow(SettingRow):
                 width: {(38)}px;
                 height: {(20)}px;
                 border-radius: {(10)}px;
-                background: {Colors.BORDER};
-                border: 1px solid {Colors.SURFACE_ACTIVE};
+                background: {Colors.SURFACE_ACTIVE};
+                border: 1px solid {Colors.BORDER};
+            }}
+            QCheckBox::indicator:hover {{
+                background: {Colors.SURFACE_HOVER};
+                border: 1px solid {Colors.BORDER_FOCUS};
             }}
             QCheckBox::indicator:checked {{
                 background: {Colors.ACCENT};
                 border: 1px solid {Colors.ACCENT};
+            }}
+            QCheckBox::indicator:checked:hover {{
+                background: {Colors.ACCENT_HOVER};
+                border: 1px solid {Colors.ACCENT_LIGHT};
             }}
         """)
         self.checkbox.toggled.connect(self.changed.emit)
@@ -117,35 +126,7 @@ class ComboRow(SettingRow):
         self.combo = QComboBox()
         self.combo.setFixedWidth((130))
         self.combo.setFont(QFont(FONT_FAMILY, Metrics.FONT_MD))
-        self.combo.setStyleSheet(f"""
-            QComboBox {{
-                background: {Colors.SURFACE_RAISED};
-                border: 1px solid {Colors.BORDER};
-                border-radius: {Metrics.BORDER_RADIUS_SM}px;
-                color: {Colors.TEXT_PRIMARY};
-                padding: {(5)}px {(10)}px;
-            }}
-            QComboBox:hover {{
-                border: 1px solid {Colors.BORDER_FOCUS};
-            }}
-            QComboBox::drop-down {{
-                border: none;
-                width: {(22)}px;
-            }}
-            QComboBox::down-arrow {{
-                image: none;
-                border: none;
-            }}
-            QComboBox QAbstractItemView {{
-                background: {Colors.DROPDOWN_BG};
-                color: {Colors.TEXT_PRIMARY};
-                selection-background-color: {Colors.ACCENT};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 4px;
-                padding: 2px;
-                outline: none;
-            }}
-        """)
+        self.combo.setStyleSheet(combo_css())
         if options:
             self.combo.addItems(options)
         if current:
@@ -458,16 +439,7 @@ class _TokenRow(SettingRow):
             link_btn = QPushButton("Get token ↗")
             link_btn.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
             link_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            link_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent;
-                    border: none;
-                    color: {Colors.ACCENT};
-                    padding: 0;
-                    text-align: left;
-                }}
-                QPushButton:hover {{ color: {Colors.ACCENT_LIGHT}; text-decoration: underline; }}
-            """)
+            link_btn.setStyleSheet(link_btn_css())
             link_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(link_url)))
             # Insert into the left-side text layout (after title + description)
             self._text_layout.addWidget(link_btn)
@@ -487,18 +459,7 @@ class _TokenRow(SettingRow):
         self.token_input.setFixedWidth((220))
         self.token_input.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
         self.token_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.token_input.setStyleSheet(f"""
-            QLineEdit {{
-                background: {Colors.SURFACE_RAISED};
-                border: 1px solid {Colors.BORDER};
-                border-radius: {Metrics.BORDER_RADIUS_SM}px;
-                color: {Colors.TEXT_PRIMARY};
-                padding: {(5)}px {(8)}px;
-            }}
-            QLineEdit:focus {{
-                border: 1px solid {Colors.BORDER_FOCUS};
-            }}
-        """)
+        self.token_input.setStyleSheet(input_css())
         right_layout.addWidget(self.token_input)
 
         self.save_btn = QPushButton("Connect")
@@ -573,6 +534,62 @@ class _TokenRow(SettingRow):
 
 
 # ── Card container ──────────────────────────────────────────────────────────
+
+class _CacheSizeRow(SettingRow):
+    """Setting row showing live transcode-cache usage with a Clear button."""
+
+    def __init__(self):
+        super().__init__("Cache Status", "Calculating…")
+        self._clear_btn = QPushButton("Clear Cache")
+        self._clear_btn.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
+        self._clear_btn.setFixedWidth(110)
+        self._clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._clear_btn.setStyleSheet(danger_btn_css())
+        self._clear_btn.clicked.connect(self._on_clear)
+        self.add_control(self._clear_btn)
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Update the displayed size from the cache index (fast — no disk scan)."""
+        try:
+            from SyncEngine.transcode_cache import TranscodeCache
+            from settings import get_settings
+            s = get_settings()
+            cache_dir = Path(s.transcode_cache_dir) if s.transcode_cache_dir else None
+            stats = TranscodeCache(cache_dir).stats()
+            gb = stats["total_size_gb"]
+            count = stats["total_files"]
+            max_gb = stats.get("max_size_gb", 0.0)
+            if max_gb > 0:
+                self.desc_label.setText(f"{gb:.2f} GB used of {max_gb:.0f} GB · {count:,} files")
+            else:
+                self.desc_label.setText(f"{gb:.2f} GB · {count:,} files")
+            self._clear_btn.setEnabled(count > 0)
+        except Exception as exc:
+            self.desc_label.setText(f"Unavailable ({exc})")
+
+    def _on_clear(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        from SyncEngine.transcode_cache import TranscodeCache
+        from settings import get_settings
+        reply = QMessageBox.question(
+            self,
+            "Clear Transcode Cache",
+            "Delete all cached transcoded files?\n\n"
+            "They will be re-created on the next sync.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            s = get_settings()
+            cache_dir = Path(s.transcode_cache_dir) if s.transcode_cache_dir else None
+            n = TranscodeCache(cache_dir).clear()
+            self.desc_label.setText(f"Cleared — {n:,} files removed")
+            self._clear_btn.setEnabled(False)
+        except Exception as exc:
+            self.desc_label.setText(f"Error clearing cache: {exc}")
+
 
 class _SettingsCard(QFrame):
     """Ventura-style rounded card containing grouped setting rows."""
@@ -776,7 +793,11 @@ class SettingsPage(QWidget):
             "Theme",
             "Choose the color scheme for the interface. "
             "System follows your OS preference.",
-            options=["Dark", "Light", "System"],
+            options=[
+                "Dark", "Light", "System",
+                "Catppuccin Mocha", "Catppuccin Macchiato",
+                "Catppuccin Frappé", "Catppuccin Latte",
+            ],
             current="Dark",
         )
 
@@ -904,14 +925,40 @@ class SettingsPage(QWidget):
             options=["Auto", "1", "2", "4", "6", "8"],
             current="Auto",
         )
+        self.mono_for_spoken = ToggleRow(
+            "Mono for Spoken Word",
+            "Downmix to mono when encoding at Spoken Word quality (64 kbps). "
+            "Mono at 64 kbps sounds significantly better than stereo and "
+            "cuts podcast/audiobook file sizes by roughly 50%.",
+        )
+        self.smart_quality_by_type = ToggleRow(
+            "Smart Quality by Content Type",
+            "Automatically use Spoken Word quality for podcasts, audiobooks, "
+            "and iTunes U files. Music tracks always use the configured "
+            "AAC Quality preset.",
+        )
+        self.normalize_sample_rate = ToggleRow(
+            "Normalize to 44.1 kHz",
+            "Always output audio at 44,100 Hz (CD rate). "
+            "Recommended for early iPods (1G–4G) that can have playback "
+            "quirks with 48 kHz ALAC, and reduces file size for "
+            "hi-res (96/192 kHz) FLAC sources.",
+        )
 
         return self._make_page(
             "Transcoding",
             _SettingsCard(
                 self.aac_quality,
                 self.prefer_lossy,
+                self.mono_for_spoken,
+                self.smart_quality_by_type,
+            ),
+            _SettingsCard(
                 self.video_crf,
                 self.video_preset,
+            ),
+            _SettingsCard(
+                self.normalize_sample_rate,
                 self.sync_workers,
             ),
         )
@@ -981,6 +1028,14 @@ class SettingsPage(QWidget):
             "Where transcoded files are cached to avoid re-encoding "
             "on future syncs. Leave empty for the default (~/iOpenPod/cache).",
         )
+        self.max_cache_size = ComboRow(
+            "Max Cache Size",
+            "Oldest cached files are automatically removed (LRU) to stay "
+            "within this limit. Set to Unlimited if storage is not a concern.",
+            options=["Unlimited", "1 GB", "2 GB", "5 GB", "10 GB", "20 GB", "50 GB"],
+            current="5 GB",
+        )
+        self.cache_status = _CacheSizeRow()
         self.settings_dir = FolderRow(
             "Settings Location",
             "Custom directory to store iOpenPod settings. Useful for "
@@ -1003,6 +1058,10 @@ class SettingsPage(QWidget):
             "Storage",
             _SettingsCard(
                 self.transcode_cache_dir,
+                self.max_cache_size,
+                self.cache_status,
+            ),
+            _SettingsCard(
                 self.settings_dir,
                 self.log_dir,
                 self.reset_storage_row,
@@ -1071,7 +1130,13 @@ class SettingsPage(QWidget):
         self.show_art.value = s.show_art_in_tracklist
 
         # Theme
-        theme_display = {"dark": "Dark", "light": "Light", "system": "System"}
+        theme_display = {
+            "dark": "Dark", "light": "Light", "system": "System",
+            "catppuccin-mocha": "Catppuccin Mocha",
+            "catppuccin-macchiato": "Catppuccin Macchiato",
+            "catppuccin-frappe": "Catppuccin Frappé",
+            "catppuccin-latte": "Catppuccin Latte",
+        }
         theme_text = theme_display.get(s.theme, "Dark")
         idx = self.theme_combo.combo.findText(theme_text)
         if idx >= 0:
@@ -1085,6 +1150,14 @@ class SettingsPage(QWidget):
             self.high_contrast.combo.setCurrentIndex(idx)
 
         self.transcode_cache_dir.value = s.transcode_cache_dir
+        # Max cache size combo
+        _size_map = {0.0: "Unlimited", 1.0: "1 GB", 2.0: "2 GB", 5.0: "5 GB",
+                     10.0: "10 GB", 20.0: "20 GB", 50.0: "50 GB"}
+        _size_text = _size_map.get(float(s.max_cache_size_gb), "5 GB")
+        idx = self.max_cache_size.combo.findText(_size_text)
+        if idx >= 0:
+            self.max_cache_size.combo.setCurrentIndex(idx)
+        self.cache_status.refresh()
         self.settings_dir.value = s.settings_dir
         self.log_dir.value = s.log_dir
         self.ffmpeg_path.value = s.ffmpeg_path
@@ -1116,6 +1189,11 @@ class SettingsPage(QWidget):
         # Prefer lossy toggle
         self.prefer_lossy.value = s.prefer_lossy
 
+        # Audio encoding options
+        self.mono_for_spoken.value = s.mono_for_spoken
+        self.smart_quality_by_type.value = s.smart_quality_by_type
+        self.normalize_sample_rate.value = s.normalize_sample_rate
+
         # Video CRF → combo text
         crf_map = {18: "18 (High)", 20: "20 (Good)", 23: "23 (Balanced)", 26: "26 (Low)", 28: "28 (Very Low)"}
         crf_text = crf_map.get(s.video_crf, "23 (Balanced)")
@@ -1144,6 +1222,9 @@ class SettingsPage(QWidget):
             self.rating_strategy.changed.connect(self._save)
             self.aac_quality.changed.connect(self._save)
             self.prefer_lossy.changed.connect(self._save)
+            self.mono_for_spoken.changed.connect(self._save)
+            self.smart_quality_by_type.changed.connect(self._save)
+            self.normalize_sample_rate.changed.connect(self._save)
             self.video_crf.changed.connect(self._save)
             self.video_preset.changed.connect(self._save)
             self.sync_workers.changed.connect(self._save)
@@ -1151,6 +1232,7 @@ class SettingsPage(QWidget):
             self.theme_combo.changed.connect(self._save)
             self.high_contrast.changed.connect(self._save)
             self.transcode_cache_dir.changed.connect(self._save)
+            self.max_cache_size.changed.connect(self._save)
             self.settings_dir.changed.connect(self._save)
             self.log_dir.changed.connect(self._save)
             self.ffmpeg_path.changed.connect(self._save_and_refresh_tools)
@@ -1181,7 +1263,13 @@ class SettingsPage(QWidget):
         s.show_art_in_tracklist = self.show_art.value
 
         # Theme
-        theme_keys = {"Dark": "dark", "Light": "light", "System": "system"}
+        theme_keys = {
+            "Dark": "dark", "Light": "light", "System": "system",
+            "Catppuccin Mocha": "catppuccin-mocha",
+            "Catppuccin Macchiato": "catppuccin-macchiato",
+            "Catppuccin Frappé": "catppuccin-frappe",
+            "Catppuccin Latte": "catppuccin-latte",
+        }
         old_theme, old_hc = s.theme, s.high_contrast
         s.theme = theme_keys.get(self.theme_combo.value, "dark")
 
@@ -1190,6 +1278,24 @@ class SettingsPage(QWidget):
         s.high_contrast = hc_keys.get(self.high_contrast.value, "off")
 
         s.transcode_cache_dir = self.transcode_cache_dir.value
+        # Parse max cache size
+        _size_keys = {"Unlimited": 0.0, "1 GB": 1.0, "2 GB": 2.0, "5 GB": 5.0,
+                      "10 GB": 10.0, "20 GB": 20.0, "50 GB": 50.0}
+        new_max_gb = _size_keys.get(self.max_cache_size.value, 5.0)
+        limit_lowered = (s.max_cache_size_gb > 0
+                         and (new_max_gb == 0 or new_max_gb < s.max_cache_size_gb))
+        s.max_cache_size_gb = new_max_gb
+        # If limit was lowered, evict immediately so cache stays within bounds
+        if not limit_lowered:
+            pass
+        else:
+            try:
+                from SyncEngine.transcode_cache import TranscodeCache
+                cache_dir = Path(s.transcode_cache_dir) if s.transcode_cache_dir else None
+                TranscodeCache(cache_dir).trim_to_limit()
+                self.cache_status.refresh()
+            except Exception:
+                pass
         s.settings_dir = self.settings_dir.value
         s.log_dir = self.log_dir.value
         s.ffmpeg_path = self.ffmpeg_path.value
@@ -1210,6 +1316,11 @@ class SettingsPage(QWidget):
 
         # Prefer lossy toggle
         s.prefer_lossy = self.prefer_lossy.value
+
+        # Audio encoding options
+        s.mono_for_spoken = self.mono_for_spoken.value
+        s.smart_quality_by_type = self.smart_quality_by_type.value
+        s.normalize_sample_rate = self.normalize_sample_rate.value
 
         # Parse video CRF (extract leading integer)
         crf_text = self.video_crf.value

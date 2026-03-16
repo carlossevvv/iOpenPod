@@ -1193,6 +1193,7 @@ class SyncExecutor:
             if fingerprint:
                 cached_path = self.transcode_cache.get(
                     fingerprint, target_format, source_size, bitrate,
+                    source_path=source_path,
                 )
                 if cached_path:
                     ext = cached_path.suffix
@@ -1241,6 +1242,7 @@ class SyncExecutor:
                         target_format=target_format,
                         source_size=source_size,
                         bitrate=bitrate,
+                        source_path=source_path,
                     )
 
                 # Copy to iPod (the actual bottleneck — USB I/O)

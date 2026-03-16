@@ -1,4 +1,4 @@
-from PyQt6.QtCore import pyqtSignal, Qt, QRegularExpression, QSize
+from PyQt6.QtCore import pyqtSignal, Qt, QRegularExpression, QSize, QTimer
 from PyQt6.QtWidgets import (
     QFrame, QPushButton, QVBoxLayout, QHBoxLayout,
     QLabel, QWidget, QProgressBar, QLineEdit, QScrollArea
@@ -245,17 +245,30 @@ class DeviceInfoCard(QFrame):
         self.storage_bar.setTextVisible(False)
         self.storage_bar.setStyleSheet(f"""
             QProgressBar {{
-                background-color: {Colors.SHADOW};
+                background-color: {Colors.BORDER_SUBTLE};
                 border: none;
                 border-radius: {(2)}px;
             }}
             QProgressBar::chunk {{
-                background: {Colors.ACCENT};
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {Colors.ACCENT}, stop:1 {Colors.ACCENT_LIGHT});
                 border-radius: {(2)}px;
             }}
         """)
         self.storage_bar.hide()  # Hidden until we have capacity data
         layout.addWidget(self.storage_bar)
+
+        # Save indicator — shown briefly after quick metadata writes
+        self._save_label = QLabel()
+        self._save_label.setFont(QFont(FONT_FAMILY, Metrics.FONT_XS))
+        self._save_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._save_label.setStyleSheet("background: transparent; border: none;")
+        self._save_label.hide()
+        layout.addWidget(self._save_label)
+
+        self._save_hide_timer = QTimer(self)
+        self._save_hide_timer.setSingleShot(True)
+        self._save_hide_timer.timeout.connect(self._save_label.hide)
 
         self._tech_expanded = False
 
@@ -444,6 +457,33 @@ class DeviceInfoCard(QFrame):
             parts.append(f"{albums:,} albums")
         self.items_stat.desc_label.setText("items")
 
+    def show_save_indicator(self, state: str) -> None:
+        """Show a brief status indicator after a quick metadata write.
+
+        state: "saving" | "saved" | "error"
+        """
+        self._save_hide_timer.stop()
+        if state == "saving":
+            self._save_label.setStyleSheet(
+                f"background: transparent; border: none; color: {Colors.TEXT_TERTIARY};"
+            )
+            self._save_label.setText("Saving…")
+            self._save_label.show()
+        elif state == "saved":
+            self._save_label.setStyleSheet(
+                f"background: transparent; border: none; color: {Colors.SUCCESS};"
+            )
+            self._save_label.setText("✓ Saved")
+            self._save_label.show()
+            self._save_hide_timer.start(2500)
+        elif state == "error":
+            self._save_label.setStyleSheet(
+                f"background: transparent; border: none; color: {Colors.DANGER};"
+            )
+            self._save_label.setText("⚠ Save failed")
+            self._save_label.show()
+            self._save_hide_timer.start(4000)
+
     def clear(self):
         """Clear all info (when no device selected)."""
         self.name_label.setText("No Device")
@@ -453,6 +493,8 @@ class DeviceInfoCard(QFrame):
         self.size_stat.setValue("—")
         self.duration_stat.setValue("—")
         self.storage_bar.hide()
+        self._save_label.hide()
+        self._save_hide_timer.stop()
         # Clear tech details
         for row in (
             self.model_num_row, self.serial_row, self.firmware_row,
@@ -639,6 +681,10 @@ class Sidebar(QFrame):
                                       videos=videos, podcasts=podcasts, audiobooks=audiobooks)
         if db_version_hex:
             self.device_card.update_database_info(db_version_hex, db_version_name, db_id)
+
+    def show_save_indicator(self, state: str) -> None:
+        """Delegate save indicator to the device info card."""
+        self.device_card.show_save_indicator(state)
 
     def clearDeviceInfo(self):
         """Clear device info when no device is selected."""

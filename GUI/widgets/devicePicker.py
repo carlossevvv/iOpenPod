@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
 from device_info import DeviceInfo
 from ..device_scanner import scan_for_ipods
 from ..ipod_images import get_ipod_image
-from ..styles import Colors, FONT_FAMILY, Metrics, btn_css, make_scroll_area
+from ..styles import Colors, FONT_FAMILY, Metrics, btn_css, accent_btn_css, make_scroll_area
 
 
 class _ScanThread(QThread):
@@ -238,23 +238,7 @@ class DevicePickerDialog(QDialog):
         self._select_btn.setFont(QFont(FONT_FAMILY, Metrics.FONT_MD, QFont.Weight.DemiBold))
         self._select_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._select_btn.setEnabled(False)
-        self._select_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {Colors.ACCENT_DIM};
-                border: 1px solid {Colors.ACCENT_BORDER};
-                border-radius: {Metrics.BORDER_RADIUS_SM}px;
-                color: {Colors.TEXT_ON_ACCENT};
-                padding: {(7)}px {(24)}px;
-            }}
-            QPushButton:hover {{
-                background: {Colors.ACCENT_HOVER};
-            }}
-            QPushButton:disabled {{
-                background: {Colors.SURFACE};
-                border: 1px solid {Colors.BORDER_SUBTLE};
-                color: {Colors.TEXT_DISABLED};
-            }}
-        """)
+        self._select_btn.setStyleSheet(accent_btn_css())
         self._select_btn.clicked.connect(self.accept)
         btn_layout.addWidget(self._select_btn)
 
