@@ -106,13 +106,64 @@ def checksum_type_for_family_gen(
 ) -> Optional[ChecksumType]:
     """Return the checksum type for a (family, generation) pair.
 
-    Derives the answer from ``_FAMILY_GEN_CAPABILITIES``.  Returns ``None``
-    if the pair is not in the lookup table — callers should fall through to
-    secondary detection (HashInfo, firmware hints, etc.).
+    Derives the answer from ``_FAMILY_GEN_CAPABILITIES``.  If the exact
+    (family, generation) pair is not found but *generation* is empty/unknown,
+    checks whether all known generations of *family* share the same checksum
+    type and returns it (e.g. all iPod Classic gens use HASH58).
+
+    Returns ``None`` if the pair is not in the lookup table and the family-
+    level fallback is ambiguous — callers should fall through to secondary
+    detection (HashInfo, firmware hints, etc.).
     """
     caps = _FAMILY_GEN_CAPABILITIES.get((family, generation))
     if caps is not None:
         return caps.checksum
+
+    # Family-level fallback: if generation is unknown but every known
+    # generation of this family uses the same checksum, use that.
+    if family and not generation:
+        family_checksums = {
+            c.checksum
+            for (f, _g), c in _FAMILY_GEN_CAPABILITIES.items()
+            if f == family
+        }
+        if len(family_checksums) == 1:
+            return family_checksums.pop()
+
+    return None
+
+
+def infer_generation(
+    family: str,
+    capacity: str = "",
+) -> Optional[str]:
+    """Best-effort generation inference from family + available signals.
+
+    Uses the model table to find which generations match a given capacity.
+    If only one generation of a family offers that capacity, we can infer
+    the generation with certainty (e.g. iPod Classic 120GB → 2nd Gen).
+
+    Falls back to returning the sole generation if a family has only one.
+    Returns ``None`` when the generation is ambiguous.
+    """
+    if not family:
+        return None
+
+    family_gens = {g for (f, g) in _FAMILY_GEN_CAPABILITIES if f == family}
+
+    # Only one generation in the family — trivial.
+    if len(family_gens) == 1:
+        return family_gens.pop()
+
+    if capacity:
+        # Find which generations of this family have the given capacity.
+        matching_gens: set[str] = set()
+        for _mn, (_mf, _mg, _mc, _color) in IPOD_MODELS.items():
+            if _mf == family and _mc == capacity:
+                matching_gens.add(_mg)
+        if len(matching_gens) == 1:
+            return matching_gens.pop()
+
     return None
 
 
@@ -378,8 +429,11 @@ def ithmb_formats_for_device(
 
     This is the format expected by the ArtworkDB writer.  Returns an empty
     dict if the device is not recognised or has no artwork support.
+
+    Uses ``capabilities_for_family_gen()`` which includes family-level
+    fallback when generation is unknown.
     """
-    caps = _FAMILY_GEN_CAPABILITIES.get((family, generation))
+    caps = capabilities_for_family_gen(family, generation or "")
     if caps is None or not caps.supports_artwork:
         return {}
     return {af.format_id: (af.width, af.height) for af in caps.cover_art_formats}
@@ -486,7 +540,7 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
     ),
 
     # ── iPod Classic (all gens): HASH58, gapless, video ───────────────
-    # H.264 Baseline Profile Level 3.1: up to 5 Mbps, 640×480@30fps
+    # H.264 Baseline Profile Level 3.0: up to 2.5 Mbps, 640×480@30fps
     ("iPod Classic", "1st Gen"): DeviceCapabilities(
         checksum=ChecksumType.HASH58,
         supports_video=True,
@@ -500,7 +554,6 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
         db_version=0x30,
         max_video_width=640,
         max_video_height=480,
-        h264_level="3.1",
     ),
     ("iPod Classic", "2nd Gen"): DeviceCapabilities(
         checksum=ChecksumType.HASH58,
@@ -515,7 +568,6 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
         db_version=0x30,
         max_video_width=640,
         max_video_height=480,
-        h264_level="3.1",
     ),
     ("iPod Classic", "3rd Gen"): DeviceCapabilities(
         checksum=ChecksumType.HASH58,
@@ -530,7 +582,6 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
         db_version=0x30,
         max_video_width=640,
         max_video_height=480,
-        h264_level="3.1",
     ),
 
     # ── iPod Mini (no artwork, no video) ──────────────────────────────
@@ -598,7 +649,7 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
         h264_level="1.3",
     ),
 
-    # ── iPod Nano 5G: HASH72, camera, compressed DB ──────────────────
+    # ── iPod Nano 5G: HASH72, camera, compressed DB + SQLite ─────────
     ("iPod Nano", "5th Gen"): DeviceCapabilities(
         checksum=ChecksumType.HASH72,
         supports_video=True,
@@ -607,8 +658,9 @@ _FAMILY_GEN_CAPABILITIES: dict[tuple[str, str], DeviceCapabilities] = {
         supports_photo=True,
         supports_sparse_artwork=True,
         supports_compressed_db=True,
+        uses_sqlite_db=True,
         cover_art_formats=_ART_NANO_5G,
-        music_dirs=20,
+        music_dirs=14,
         db_version=0x30,
         max_video_width=640,
         max_video_height=480,
@@ -696,7 +748,13 @@ def capabilities_for_family_gen(
 ) -> Optional[DeviceCapabilities]:
     """Return the device capabilities for a (family, generation) pair.
 
-    Returns ``None`` if the pair is not in the lookup table.
+    If the exact pair is not found but *generation* is empty/unknown,
+    checks whether all known generations of *family* share identical
+    capabilities and returns those (e.g. all iPod Classic gens are
+    functionally identical).
+
+    Returns ``None`` if the pair is not in the lookup table and the
+    family-level fallback is ambiguous.
 
     Usage::
 
@@ -704,7 +762,20 @@ def capabilities_for_family_gen(
         if caps and caps.supports_video:
             ...
     """
-    return _FAMILY_GEN_CAPABILITIES.get((family, generation))
+    caps = _FAMILY_GEN_CAPABILITIES.get((family, generation))
+    if caps is not None:
+        return caps
+
+    # Family-level fallback: all generations must agree.
+    if family and not generation:
+        family_caps = [
+            c for (f, _g), c in _FAMILY_GEN_CAPABILITIES.items()
+            if f == family
+        ]
+        if family_caps and all(c == family_caps[0] for c in family_caps):
+            return family_caps[0]
+
+    return None
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗

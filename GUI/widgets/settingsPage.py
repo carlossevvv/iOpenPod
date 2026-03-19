@@ -11,14 +11,14 @@ from PyQt6.QtCore import pyqtSignal, pyqtSlot, Qt, QUrl
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QCheckBox, QComboBox, QFrame, QScrollArea, QFileDialog,
-    QLineEdit, QStackedWidget, QProgressDialog,
+    QLineEdit, QStackedWidget, QProgressDialog, QSpinBox,
 )
 from PyQt6.QtGui import QFont, QDesktopServices
 from pathlib import Path
 from ..styles import (
-    Colors, FONT_FAMILY, Metrics, btn_css, danger_btn_css, scrollbar_css,
+    Colors, FONT_FAMILY, Metrics, btn_css, danger_btn_css,
     sidebar_nav_css, sidebar_nav_selected_css,
-    input_css, combo_css, link_btn_css,
+    input_css, combo_css, link_btn_css, make_scroll_area,
 )
 
 
@@ -139,6 +139,38 @@ class ComboRow(SettingRow):
     @property
     def value(self) -> str:
         return self.combo.currentText()
+
+
+class SpinRow(SettingRow):
+    """Setting row with a numeric spin box."""
+
+    changed = pyqtSignal(int)
+
+    def __init__(self, title: str, description: str = "",
+                 minimum: int = 1, maximum: int = 99, current: int = 3):
+        super().__init__(title, description)
+
+        self.spin = QSpinBox()
+        self.spin.setRange(minimum, maximum)
+        self.spin.setValue(current)
+        self.spin.setFixedWidth(80)
+        self.spin.setFont(QFont(FONT_FAMILY, Metrics.FONT_MD))
+        self.spin.setStyleSheet(input_css() + f"""
+            QSpinBox {{
+                padding: 4px 8px;
+                border-radius: 6px;
+            }}
+        """)
+        self.spin.valueChanged.connect(self.changed.emit)
+        self.add_control(self.spin)
+
+    @property
+    def value(self) -> int:
+        return self.spin.value()
+
+    @value.setter
+    def value(self, v: int):
+        self.spin.setValue(v)
 
 
 class FolderRow(SettingRow):
@@ -556,7 +588,7 @@ class _CacheSizeRow(SettingRow):
             from settings import get_settings
             s = get_settings()
             cache_dir = Path(s.transcode_cache_dir) if s.transcode_cache_dir else None
-            stats = TranscodeCache(cache_dir).stats()
+            stats = TranscodeCache.get_instance(cache_dir).stats()
             gb = stats["total_size_gb"]
             count = stats["total_files"]
             max_gb = stats.get("max_size_gb", 0.0)
@@ -584,7 +616,7 @@ class _CacheSizeRow(SettingRow):
         try:
             s = get_settings()
             cache_dir = Path(s.transcode_cache_dir) if s.transcode_cache_dir else None
-            n = TranscodeCache(cache_dir).clear()
+            n = TranscodeCache.get_instance(cache_dir).clear()
             self.desc_label.setText(f"Cleared — {n:,} files removed")
             self._clear_btn.setEnabled(False)
         except Exception as exc:
@@ -742,13 +774,8 @@ class SettingsPage(QWidget):
           - ``str``  → rendered as a small uppercase section header
           - ``QWidget`` → added directly (usually a _SettingsCard)
         """
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            " QScrollArea > QWidget > QWidget { background: transparent; }"
-            + scrollbar_css()
+        scroll = make_scroll_area(extra_css=
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
         )
 
         content = QWidget()
@@ -1292,7 +1319,7 @@ class SettingsPage(QWidget):
             try:
                 from SyncEngine.transcode_cache import TranscodeCache
                 cache_dir = Path(s.transcode_cache_dir) if s.transcode_cache_dir else None
-                TranscodeCache(cache_dir).trim_to_limit()
+                TranscodeCache.get_instance(cache_dir).trim_to_limit()
                 self.cache_status.refresh()
             except Exception:
                 pass
@@ -1358,11 +1385,8 @@ class SettingsPage(QWidget):
 
     def _check_for_updates(self):
         """Check GitHub for a newer version in a background thread."""
-        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
-        from GUI.auto_updater import (
-            UpdateChecker, UpdateDownloader, UpdateResult,
-            stage_update, launch_bootstrap_and_exit,
-        )
+        from PyQt6.QtWidgets import QMessageBox
+        from GUI.auto_updater import UpdateChecker, UpdateResult
 
         self.version_row.action_btn.setEnabled(False)
         self.version_row.action_btn.setText("Checking…")
@@ -1384,128 +1408,139 @@ class SettingsPage(QWidget):
                 )
                 return
 
-            # Newer version available — ask the user
-            notes_preview = result.release_notes[:500]
-            if len(result.release_notes) > 500:
-                notes_preview += "…"
+            self._handle_update_result(result)
 
-            import sys as _sys
+        self._update_checker.result_ready.connect(_on_result)
+        self._update_checker.start()
 
-            if not getattr(_sys, "frozen", False):
-                # Running from source — no point downloading a binary
-                QMessageBox.information(
-                    self, "Update Available",
-                    f"A new version is available: v{result.latest_version}\n"
-                    f"(current: v{result.current_version})\n\n"
-                    f"{notes_preview}\n\n"
-                    "You are running from source.\n"
-                    "Run 'git pull' to get the latest changes.",
-                )
-                return
+    def _handle_update_result(self, result):
+        """Show update-available UI and optionally download/install."""
+        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
+        from GUI.auto_updater import (
+            UpdateDownloader, stage_update, launch_bootstrap_and_exit,
+        )
 
-            answer = QMessageBox.question(
+        notes_preview = result.release_notes[:500]
+        if len(result.release_notes) > 500:
+            notes_preview += "…"
+
+        import sys as _sys
+
+        if not getattr(_sys, "frozen", False):
+            # Running from source — no point downloading a binary
+            QMessageBox.information(
                 self, "Update Available",
                 f"A new version is available: v{result.latest_version}\n"
                 f"(current: v{result.current_version})\n\n"
                 f"{notes_preview}\n\n"
-                f"Download now?",
+                "You are running from source.\n"
+                "Run 'git pull' to get the latest changes.",
+            )
+            return
+
+        answer = QMessageBox.question(
+            self, "Update Available",
+            f"A new version is available: v{result.latest_version}\n"
+            f"(current: v{result.current_version})\n\n"
+            f"{notes_preview}\n\n"
+            f"Download now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if answer != QMessageBox.StandardButton.Yes:
+            # Open the release page in the browser instead
+            QDesktopServices.openUrl(QUrl(result.release_page))
+            return
+
+        if not result.download_url:
+            QMessageBox.information(
+                self, "No Binary Available",
+                "No pre-built binary was found for your platform.\n\n"
+                f"Visit {result.release_page} to download manually.",
+            )
+            QDesktopServices.openUrl(QUrl(result.release_page))
+            return
+
+        # Start download with progress dialog
+        progress = QProgressDialog(
+            "Downloading update…", "Cancel", 0, 100, self,
+        )
+        progress.setWindowTitle("iOpenPod Update")
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        # Keep a reference so it isn't garbage-collected
+        self._update_progress = progress
+
+        checksum_url = result.download_url + ".sha256"
+        downloader = UpdateDownloader(result.download_url, checksum_url, self)
+        self._update_downloader = downloader
+
+        def _on_progress(downloaded: int, total: int):
+            if progress.wasCanceled():
+                return
+            pct = int(downloaded * 100 / total) if total else 0
+            progress.setValue(pct)
+
+        def _on_finished(path_str: str):
+            # Disconnect cancel so closing the dialog doesn't kill
+            # the already-finished downloader or interfere with staging.
+            try:
+                progress.canceled.disconnect()
+            except TypeError:
+                pass
+            progress.close()
+            self._update_progress = None
+            if not path_str:
+                QMessageBox.warning(
+                    self, "Download Failed",
+                    "The update could not be downloaded.\n"
+                    "Check your internet connection and try again.",
+                )
+                return
+
+            from pathlib import Path as _Path
+            archive = _Path(path_str)
+
+            # Stage the update (extract to temp dir)
+            staged = stage_update(archive)
+            if not staged:
+                QMessageBox.warning(
+                    self, "Update Failed",
+                    "Could not extract the update archive.\n\n"
+                    f"The archive is at:\n{archive}\n"
+                    "You can extract it manually.",
+                )
+                return
+
+            answer2 = QMessageBox.question(
+                self, "Install Update & Restart?",
+                f"v{result.latest_version} is ready to install.\n\n"
+                "iOpenPod will close, apply the update, and "
+                "relaunch automatically.\n\n"
+                "Continue?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
-
-            if answer != QMessageBox.StandardButton.Yes:
-                # Open the release page in the browser instead
-                QDesktopServices.openUrl(QUrl(result.release_page))
-                return
-
-            if not result.download_url:
-                QMessageBox.information(
-                    self, "No Binary Available",
-                    "No pre-built binary was found for your platform.\n\n"
-                    f"Visit {result.release_page} to download manually.",
-                )
-                QDesktopServices.openUrl(QUrl(result.release_page))
-                return
-
-            # Start download with progress dialog
-            progress = QProgressDialog(
-                "Downloading update…", "Cancel", 0, 100, self,
-            )
-            progress.setWindowTitle("iOpenPod Update")
-            progress.setMinimumDuration(0)
-            progress.setAutoClose(False)
-            progress.setAutoReset(False)
-            # Keep a reference so it isn't garbage-collected
-            self._update_progress = progress
-
-            checksum_url = result.download_url + ".sha256"
-            downloader = UpdateDownloader(result.download_url, checksum_url, self)
-            self._update_downloader = downloader
-
-            def _on_progress(downloaded: int, total: int):
-                if progress.wasCanceled():
-                    return
-                pct = int(downloaded * 100 / total) if total else 0
-                progress.setValue(pct)
-
-            def _on_finished(path_str: str):
-                # Disconnect cancel so closing the dialog doesn't kill
-                # the already-finished downloader or interfere with staging.
-                try:
-                    progress.canceled.disconnect()
-                except TypeError:
-                    pass
-                progress.close()
-                self._update_progress = None
-                if not path_str:
-                    QMessageBox.warning(
-                        self, "Download Failed",
-                        "The update could not be downloaded.\n"
-                        "Check your internet connection and try again.",
-                    )
-                    return
-
-                from pathlib import Path as _Path
-                archive = _Path(path_str)
-
-                # Stage the update (extract to temp dir)
-                staged = stage_update(archive)
-                if not staged:
+            if answer2 == QMessageBox.StandardButton.Yes:
+                if launch_bootstrap_and_exit(staged):
+                    # Bootstrap is running — close the app so it
+                    # can replace our files and relaunch.
+                    from PyQt6.QtWidgets import QApplication
+                    app = QApplication.instance()
+                    if app:
+                        app.quit()
+                else:
                     QMessageBox.warning(
                         self, "Update Failed",
-                        "Could not extract the update archive.\n\n"
-                        f"The archive is at:\n{archive}\n"
-                        "You can extract it manually.",
+                        "Could not start the update installer.\n\n"
+                        f"The update files are at:\n{staged}\n"
+                        "You can copy them manually.",
                     )
-                    return
 
-                answer2 = QMessageBox.question(
-                    self, "Install Update & Restart?",
-                    f"v{result.latest_version} is ready to install.\n\n"
-                    "iOpenPod will close, apply the update, and "
-                    "relaunch automatically.\n\n"
-                    "Continue?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                if answer2 == QMessageBox.StandardButton.Yes:
-                    if launch_bootstrap_and_exit(staged):
-                        # Bootstrap is running — close the app so it
-                        # can replace our files and relaunch.
-                        from PyQt6.QtWidgets import QApplication
-                        app = QApplication.instance()
-                        if app:
-                            app.quit()
-                    else:
-                        QMessageBox.warning(
-                            self, "Update Failed",
-                            "Could not start the update installer.\n\n"
-                            f"The update files are at:\n{staged}\n"
-                            "You can copy them manually.",
-                        )
-
-            downloader.progress.connect(_on_progress)
-            downloader.finished_download.connect(_on_finished)
-            progress.canceled.connect(downloader.terminate)
-            downloader.start()
+        downloader.progress.connect(_on_progress)
+        downloader.finished_download.connect(_on_finished)
+        progress.canceled.connect(downloader.terminate)
+        downloader.start()
 
         self._update_checker.result_ready.connect(_on_result)
         self._update_checker.start()

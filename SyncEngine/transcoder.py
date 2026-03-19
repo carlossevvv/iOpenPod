@@ -379,8 +379,10 @@ def _get_video_caps() -> tuple[int, int, int, int, str]:
         from device_info import get_current_device
         from ipod_models import capabilities_for_family_gen
         dev = get_current_device()
-        if dev and dev.model_family and dev.generation:
-            caps = capabilities_for_family_gen(dev.model_family, dev.generation)
+        if dev and dev.model_family:
+            caps = capabilities_for_family_gen(
+                dev.model_family, dev.generation or "",
+            )
             if caps and caps.max_video_width > 0:
                 return (
                     caps.max_video_width,

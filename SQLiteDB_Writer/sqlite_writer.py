@@ -174,11 +174,12 @@ def write_sqlite_databases(
                     locations_itdb_path=loc_path,
                     checksum_type=checksum_type,
                     firewire_id=firewire_id,
+                    ipod_path=ipod_path,
                 )
             except Exception as e:
                 logger.error("Failed to write Locations.itdb.cbk: %s", e)
-                # CBK is critical for HASHAB devices — fail the whole write
-                if checksum_type == ChecksumType.HASHAB:
+                # CBK is critical for signed devices — fail the whole write
+                if checksum_type in (ChecksumType.HASHAB, ChecksumType.HASH72):
                     raise
                 # For other devices, continue without it
                 cbk_path = None

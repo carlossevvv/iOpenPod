@@ -163,7 +163,7 @@ class TranscodeCache:
 
     Usage::
 
-        cache = TranscodeCache()
+        cache = TranscodeCache.get_instance()
 
         # Check if already cached
         cached = cache.get(fingerprint, "alac", source_size, source_path=path)
@@ -174,6 +174,22 @@ class TranscodeCache:
             transcode(source, reserve_path.parent, reserve_path.stem)
             cache.commit(fingerprint, "flac", "alac", source_size, source_path=path)
     """
+
+    _instance: Optional["TranscodeCache"] = None
+    _instance_lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls, cache_dir: Optional[Path] = None) -> "TranscodeCache":
+        """Return the shared singleton, creating it on first call.
+
+        If *cache_dir* differs from the current instance's directory,
+        the singleton is replaced with a new one pointing at the new path.
+        """
+        resolved = cache_dir or DEFAULT_CACHE_DIR
+        with cls._instance_lock:
+            if cls._instance is None or cls._instance.cache_dir != resolved:
+                cls._instance = cls(cache_dir)
+        return cls._instance
 
     def __init__(self, cache_dir: Optional[Path] = None):
         self.cache_dir = cache_dir or DEFAULT_CACHE_DIR

@@ -153,6 +153,11 @@ class SyncPlan:
     # Cleaned from mapping during execution, not shown to user.
     _stale_mapping_entries: list[tuple[str, int]] = field(default_factory=list)
 
+    # Integrity removals: tracks whose files are missing from the iPod.
+    # Always executed (not subject to user checkbox selection).  Kept
+    # separate from to_remove so they don't appear in the "Remove" card.
+    _integrity_removals: list[SyncItem] = field(default_factory=list)
+
     # Mapping file loaded during compute_diff — carried through to executor
     # so we don't load it twice.
     mapping: MappingFile | None = None
@@ -183,6 +188,7 @@ class SyncPlan:
             self.to_update_artwork,
             self.to_sync_playcount,
             self.to_sync_rating,
+            self._integrity_removals,
             self.playlists_to_add,
             self.playlists_to_edit,
             self.playlists_to_remove,
@@ -399,7 +405,7 @@ class FingerprintDiffEngine:
         # they'd be written straight back.
         for ghost_track in integrity_report.missing_files:
             ghost_db_id = ghost_track.get("db_id")
-            plan.to_remove.append(SyncItem(
+            plan._integrity_removals.append(SyncItem(
                 action=SyncAction.REMOVE_FROM_IPOD,
                 fingerprint=None,
                 db_id=ghost_db_id,
@@ -410,7 +416,6 @@ class FingerprintDiffEngine:
                     f"{ghost_track.get('Title', 'Unknown')}"
                 ),
             ))
-            plan.storage.bytes_to_remove += ghost_track.get("size", 0)
 
         # Rebuild db_id lookup in case integrity check removed some tracks
         ipod_by_db_id = {}
@@ -723,6 +728,12 @@ class FingerprintDiffEngine:
                     plan._stale_mapping_entries.append((fp, db_id))
                     continue
 
+                # Skip podcast tracks — managed by PodcastManager, not
+                # the PC-folder sync.  Their fingerprints won't appear
+                # in the PC scan so they'd always look "orphaned".
+                if ipod_track.get("media_type", 0) & 0x04:
+                    continue
+
                 plan.to_remove.append(SyncItem(
                     action=SyncAction.REMOVE_FROM_IPOD,
                     fingerprint=fp,
@@ -748,6 +759,10 @@ class FingerprintDiffEngine:
 
                 if not ipod_track:
                     plan._stale_mapping_entries.append((fp, db_id))
+                    continue
+
+                # Skip podcast tracks (same reason as 4a).
+                if ipod_track.get("media_type", 0) & 0x04:
                     continue
 
                 plan.to_remove.append(SyncItem(
@@ -777,6 +792,10 @@ class FingerprintDiffEngine:
 
         for db_id, ipod_track in ipod_by_db_id.items():
             if db_id in accounted_db_ids:
+                continue
+            # Skip podcast tracks — they are managed by the podcast
+            # subsystem (PodcastManager), not the PC-folder sync.
+            if ipod_track.get("media_type", 0) & 0x04:
                 continue
             # This track exists in iTunesDB but has no mapping entry and
             # was not matched to any PC track → it should be removed.

@@ -257,7 +257,7 @@ class PlaylistInfoCard(QFrame):
         if pl_id_copy:
             self._add_detail_row("Playlist ID Copy", f"0x{pl_id_copy:016X}")
 
-        db_id = playlist.get("unk0x24", 0)
+        db_id = playlist.get("db_id_2", 0)
         if db_id:
             self._add_detail_row("Database ID", f"0x{db_id:016X}")
 

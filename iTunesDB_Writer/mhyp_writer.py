@@ -22,7 +22,7 @@ Header layout (MHYP_HEADER_SIZE = 184 bytes):
     +0x28: string_mhod_count (2B)
     +0x2A: podcast_flag (2B) — 0=normal, 1=podcast playlist (u16, libgpod podcastflag)
     +0x2C: sort_order (4B)
-    +0x3C: id_0x24 (8B) — MHBD database ID reference (non-master)
+    +0x3C: db_id_2 (8B) — MHBD database ID reference (non-master)
     +0x44: playlist_id_copy (8B)
     +0x50: mhsd5_type (2B) — browsing category for dataset 5
     +0x58: timestamp_copy (4B Mac)
@@ -97,7 +97,7 @@ class PlaylistInfo:
     #   Dataset 5: True for ALL built-in categories (Music, Movies, etc.).
     #   In both cases this controls: (a) the type byte at +0x14,
     #   (b) whether library indices are generated (only when tracks
-    #       are also provided), and (c) whether id_0x24/playlist_id
+    #       are also provided), and (c) whether db_id_2/playlist_id
     #       are written at the extended offsets +0x3C/+0x44 (skipped
     #       when master=True, matching libgpod behaviour).
     sortorder: int = 0                   # 0=default, 1=manual, 3=title ...
@@ -138,7 +138,7 @@ def write_mhyp(
     sortorder: int = 0,
     podcast_flag: int = 0,
     tracks: Optional[List["TrackInfo"]] = None,
-    id_0x24: int = 0,
+    db_id_2: int = 0,
     smart_prefs: Optional[SmartPlaylistPrefs] = None,
     smart_rules: Optional[SmartPlaylistRules] = None,
     mhsd5_type: int = 0,
@@ -174,7 +174,7 @@ def write_mhyp(
                 (a) type byte at +0x14 is written as 1,
                 (b) library indices are generated IF *tracks* is also
                     provided (ds5 never passes tracks, so this is safe),
-                (c) id_0x24 and playlist_id are NOT written at +0x3C/+0x44
+                (c) db_id_2 and playlist_id are NOT written at +0x3C/+0x44
                     (matches libgpod, which zeros these for type=1).
         timestamp: Creation timestamp (now if not provided)
         sortorder: Sort order (0 = manual)
@@ -182,7 +182,7 @@ def write_mhyp(
                      matching libgpod podcastflag).
         tracks: List of TrackInfo objects (required for Master Playlist to
                 generate library index MHODs type 52/53)
-        id_0x24: Database-wide ID from MHBD offset 0x24. Written at MHYP offset
+        db_id_2: Database-wide ID from MHBD offset 0x24. Written at MHYP offset
                  0x3C for non-master playlists, and used as a validation field.
         smart_prefs: Smart playlist preferences (MHOD 50). Both smart_prefs
                      and smart_rules must be set for a smart playlist.
@@ -294,11 +294,11 @@ def write_mhyp(
         'timestamp_2': timestamp,
     }
 
-    # Non-master playlists write id_0x24 and playlist_id at extended offsets.
+    # Non-master playlists write db_id_2 and playlist_id at extended offsets.
     # For master=True (ds2 master and ds5 built-in categories), these stay
     # zeroed — matching libgpod behaviour.
     if not master:
-        values['db_id_2'] = id_0x24
+        values['db_id_2'] = db_id_2
         values['playlist_id_2'] = playlist_id
 
     # mhsd5_type — browsing category for dataset 5 smart playlists.
@@ -452,7 +452,7 @@ def _write_mhod100_raw(raw_body: bytes) -> bytes:
 
 def write_playlist(
     playlist: "PlaylistInfo",
-    id_0x24: int = 0,
+    db_id_2: int = 0,
     podcast_grouping: bool = False,
     track_album_map: Optional[dict[int, str]] = None,
     next_mhip_id_start: int = 1,
@@ -469,7 +469,7 @@ def write_playlist(
 
     Args:
         playlist: A PlaylistInfo instance.
-        id_0x24: Database-wide ID from MHBD offset 0x24.
+        db_id_2: Database-wide ID from MHBD offset 0x24.
         podcast_grouping: When True and playlist.podcast_flag is set,
                      generate grouped MHIPs for podcast episodes.
         track_album_map: track_id → album name (required when
@@ -489,7 +489,7 @@ def write_playlist(
         master=playlist.master,
         sortorder=playlist.sortorder,
         podcast_flag=playlist.podcast_flag,
-        id_0x24=id_0x24,
+        db_id_2=db_id_2,
         smart_prefs=playlist.smart_prefs,
         smart_rules=playlist.smart_rules,
         mhsd5_type=playlist.mhsd5_type,
@@ -504,7 +504,7 @@ def write_playlist(
 
 def write_master_playlist(
     track_ids: List[int],
-    id_0x24: int,
+    db_id_2: int,
     name: str = "iPod",
     tracks: Optional[List["TrackInfo"]] = None,
     capabilities=None,
@@ -520,7 +520,7 @@ def write_master_playlist(
         track_ids: List of ALL track IDs in the database
         name: Playlist name (usually "iPod" or device name)
         tracks: List of ALL TrackInfo objects (needed for library indices)
-        id_0x24: Database-wide ID from MHBD offset 0x24
+        db_id_2: Database-wide ID from MHBD offset 0x24
         capabilities: Optional DeviceCapabilities for video sort indices.
 
     Returns:
@@ -535,6 +535,6 @@ def write_master_playlist(
         master=True,  # CRITICAL: Master playlist must have type=1
         sortorder=5,  # Match iTunes default sort order
         tracks=tracks,
-        id_0x24=id_0x24,
+        db_id_2=db_id_2,
         capabilities=capabilities,
     )

@@ -98,6 +98,27 @@ class MainWindow(QMainWindow):
             # Default to a no-device placeholder page until an iPod is selected.
             self._show_default_page()
 
+        # Auto-check for updates in the background (silent — no popup if up-to-date)
+        self._startup_update_checker = None
+        QTimer.singleShot(2000, self._auto_check_for_updates)
+
+    def _auto_check_for_updates(self):
+        """Silently check for updates at startup. Only shows UI if an update is found."""
+        from GUI.auto_updater import UpdateChecker
+
+        checker = UpdateChecker(self)
+        self._startup_update_checker = checker
+
+        def _on_result(result):
+            self._startup_update_checker = None
+            if result.error or not result.update_available:
+                return
+            # An update is available — delegate to the settings page handler
+            self.settingsPage._handle_update_result(result)
+
+        checker.result_ready.connect(_on_result)
+        checker.start()
+
     def _build_ui(self):
         """Create child widgets and wire up signals.
 
@@ -634,11 +655,79 @@ class MainWindow(QMainWindow):
         self._plan = plan  # Store for executeSyncPlan to access matched_pc_paths
         # Provide iPod tracks cache so the review widget can list artwork-missing tracks
         cache = iTunesDBCache.get_instance()
-        self.syncReview._ipod_tracks_cache = cache.get_tracks() or []
+        ipod_tracks = cache.get_tracks() or []
+        self.syncReview._ipod_tracks_cache = ipod_tracks
 
         # ── Populate playlist change info on the plan ──────────────
         self._populate_playlist_changes(plan, cache)
 
+        # ── Merge podcast managed plan ─────────────────────────────
+        # This requires refreshing RSS feeds and possibly downloading
+        # episodes, so it runs in the background.  The sync review is
+        # shown after the podcast plan is merged (or immediately if
+        # there are no podcast subscriptions).
+        browser = self.musicBrowser.podcastBrowser
+        store = browser._store
+        feeds = store.get_feeds() if store else []
+
+        if not feeds:
+            self.syncReview.show_plan(plan)
+            return
+
+        self.syncReview.update_progress("podcast_sync", 0, 0, "Refreshing podcast feeds…")
+
+        worker = Worker(
+            self._build_podcast_plan_bg, feeds, ipod_tracks, store,
+        )
+        worker.signals.result.connect(
+            lambda podcast_plan: self._on_podcast_plan_ready(plan, podcast_plan),
+        )
+        worker.signals.error.connect(
+            lambda err: self._on_podcast_plan_error(plan, err),
+        )
+        ThreadPoolSingleton.get_instance().start(worker)
+
+    def _build_podcast_plan_bg(self, feeds, ipod_tracks, store):
+        """Background: refresh feeds from RSS, then build podcast plan.
+
+        Episodes that need downloading are included in the plan — the
+        actual download happens during sync execution.
+        """
+        import logging
+        _log = logging.getLogger(__name__)
+
+        from PodcastManager.feed_parser import fetch_feed
+        from PodcastManager.podcast_sync import build_podcast_managed_plan
+
+        # Refresh all feeds from RSS to get full episode catalogs
+        refreshed = []
+        for feed in feeds:
+            try:
+                refreshed.append(fetch_feed(feed.feed_url, existing=feed))
+            except Exception as exc:
+                _log.warning("Podcast refresh failed for %s: %s", feed.title, exc)
+                refreshed.append(feed)
+        store.update_feeds(refreshed)
+
+        return build_podcast_managed_plan(refreshed, ipod_tracks, store)
+
+    def _on_podcast_plan_ready(self, plan, podcast_plan) -> None:
+        """Podcast plan built — merge into music plan and show."""
+        if podcast_plan.to_add:
+            plan.to_add.extend(podcast_plan.to_add)
+            plan.storage.bytes_to_add += podcast_plan.storage.bytes_to_add
+        if podcast_plan.to_remove:
+            plan.to_remove.extend(podcast_plan.to_remove)
+            plan.storage.bytes_to_remove += podcast_plan.storage.bytes_to_remove
+        self.syncReview.show_plan(plan)
+
+    def _on_podcast_plan_error(self, plan, error_tuple) -> None:
+        """Podcast plan failed — show music-only plan."""
+        import logging
+        _, value, _ = error_tuple
+        logging.getLogger(__name__).warning(
+            "Failed to build podcast plan: %s", value,
+        )
         self.syncReview.show_plan(plan)
 
     def _populate_playlist_changes(self, plan, cache: 'iTunesDBCache'):
@@ -749,6 +838,7 @@ class MainWindow(QMainWindow):
             to_sync_rating=rating_items,
             matched_pc_paths=original_plan.matched_pc_paths if original_plan else {},
             _stale_mapping_entries=original_plan._stale_mapping_entries if original_plan else [],
+            _integrity_removals=original_plan._integrity_removals if original_plan else [],
             mapping=original_plan.mapping if original_plan else None,
             playlists_to_add=original_plan.playlists_to_add if (original_plan and include_playlists) else [],
             playlists_to_edit=original_plan.playlists_to_edit if (original_plan and include_playlists) else [],

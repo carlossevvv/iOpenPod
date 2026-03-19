@@ -209,7 +209,7 @@ class SyncExecutor:
         self.ipod_path = Path(ipod_path)
         self.music_dir = self.ipod_path / "iPod_Control" / "Music"
         self.mapping_manager = MappingManager(ipod_path)
-        self.transcode_cache = TranscodeCache(cache_dir)
+        self.transcode_cache = TranscodeCache.get_instance(cache_dir)
 
         self._folder_counter = 0
         self._folder_lock = threading.Lock()
@@ -275,6 +275,7 @@ class SyncExecutor:
             self._execute_file_updates,     # Stage 2
             self._execute_metadata_updates,  # Stage 3
             self._execute_artwork_updates,  # Stage 3b
+            self._download_podcast_episodes,  # Stage 3c (podcast prep)
             self._execute_adds,             # Stage 4
             self._execute_sound_check,      # Stage 4b
             self._execute_playcount_sync,   # Stage 5
@@ -420,6 +421,9 @@ class SyncExecutor:
             # Save mapping ONLY after successful DB write + backpatch.
             self.mapping_manager.save(ctx.mapping)
 
+            # ── Update podcast subscription store ──────────────────
+            self._update_podcast_subscriptions(ctx)
+
             self._clear_gui_cache(ctx)
 
             self._apply_itunes_protections(ctx, all_tracks)
@@ -488,6 +492,71 @@ class SyncExecutor:
                     art_hash=getattr(pc_track, "art_hash", None),
                 )
 
+    def _update_podcast_subscriptions(self, ctx: _SyncContext) -> None:
+        """Mark added podcast episodes as on_ipod and removed ones as downloaded
+        in the subscription store so the state persists across sessions."""
+        try:
+            from PodcastManager.subscription_store import SubscriptionStore
+            from PodcastManager.models import STATUS_ON_IPOD, STATUS_DOWNLOADED
+        except ImportError:
+            return
+
+        store = SubscriptionStore(str(self.ipod_path))
+        feeds = store.get_feeds()
+        if not feeds:
+            return
+
+        # Index episodes by enclosure URL across all feeds
+        ep_by_url: dict[str, tuple] = {}
+        for feed in feeds:
+            for ep in feed.episodes:
+                if ep.audio_url:
+                    ep_by_url[ep.audio_url] = (ep, feed)
+
+        changed = False
+
+        # Mark added podcast episodes as on_ipod with their db_id
+        for track in ctx.new_tracks:
+            if not (track.media_type & 0x04):
+                continue
+            enc_url = track.podcast_enclosure_url or ""
+            if not enc_url:
+                continue
+            entry = ep_by_url.get(enc_url)
+            if entry:
+                ep, _feed = entry
+                ep.status = STATUS_ON_IPOD
+                ep.ipod_db_id = track.db_id
+                changed = True
+                logger.debug("Podcast subscription: marked '%s' as on_ipod (db_id=%d)",
+                             ep.title, track.db_id)
+
+        # Mark removed podcast episodes as downloaded (no longer on iPod)
+        all_removals = list(ctx.plan.to_remove) + list(
+            getattr(ctx.plan, '_integrity_removals', [])
+        )
+        for item in all_removals:
+            ipod_track = item.ipod_track
+            if not ipod_track:
+                continue
+            if not (ipod_track.get("media_type", 0) & 0x04):
+                continue
+            enc_url = ipod_track.get("Podcast Enclosure URL", "")
+            if not enc_url:
+                continue
+            entry = ep_by_url.get(enc_url)
+            if entry:
+                ep, _feed = entry
+                ep.status = STATUS_DOWNLOADED if ep.downloaded_path else "not_downloaded"
+                ep.ipod_db_id = 0
+                changed = True
+                logger.debug("Podcast subscription: marked '%s' as removed from iPod",
+                             ep.title)
+
+        if changed:
+            store.update_feeds(feeds)
+            logger.info("Updated podcast subscription store after sync")
+
     @staticmethod
     def _clear_gui_cache(ctx: _SyncContext) -> None:
         """Notify caller that sync completed (so it can clear pending state)."""
@@ -501,16 +570,28 @@ class SyncExecutor:
     # ── Stage Implementations ───────────────────────────────────────────────
 
     def _execute_removes(self, ctx: _SyncContext) -> None:
-        if not ctx.plan.to_remove:
+        # Combine user-selected removals with mandatory integrity removals
+        # (ghost tracks whose files are missing from iPod).
+        all_removes = list(ctx.plan.to_remove)
+        integrity_removals = getattr(ctx.plan, '_integrity_removals', [])
+        if integrity_removals:
+            # Deduplicate by db_id in case any overlap
+            existing_db_ids = {item.db_id for item in all_removes if item.db_id}
+            for item in integrity_removals:
+                if item.db_id and item.db_id not in existing_db_ids:
+                    all_removes.append(item)
+                    existing_db_ids.add(item.db_id)
+
+        if not all_removes:
             return
 
-        ctx.progress("remove", 0, len(ctx.plan.to_remove), message="Removing tracks...")
+        ctx.progress("remove", 0, len(all_removes), message="Removing tracks...")
 
-        for i, item in enumerate(ctx.plan.to_remove):
+        for i, item in enumerate(all_removes):
             if ctx.cancelled():
                 return
 
-            ctx.progress("remove", i + 1, len(ctx.plan.to_remove), item, item.description)
+            ctx.progress("remove", i + 1, len(all_removes), item, item.description)
 
             if ctx.dry_run:
                 ctx.result.tracks_removed += 1
@@ -911,6 +992,142 @@ class SyncExecutor:
                     art_hash=item.new_art_hash,
                 )
 
+    def _download_podcast_episodes(self, ctx: _SyncContext) -> None:
+        """Download podcast episodes that were selected in the plan but
+        don't have local files yet.  Runs before the add stage so the
+        copy/transcode pipeline has real files to work with.
+        """
+        if not ctx.plan.to_add:
+            return
+
+        # Identify podcast add items whose source file is missing
+        pending: list[SyncItem] = []
+        for item in ctx.plan.to_add:
+            if item.pc_track is None:
+                continue
+            if not getattr(item.pc_track, "is_podcast", False):
+                continue
+            source = Path(item.pc_track.path) if item.pc_track.path else None
+            if source and source.exists():
+                continue
+            # Needs downloading
+            enc_url = getattr(item.pc_track, "podcast_enclosure_url", "")
+            if enc_url:
+                pending.append(item)
+
+        if not pending:
+            return
+
+        ctx.progress(
+            "podcast_download", 0, len(pending),
+            message=f"Downloading {len(pending)} podcast episodes...",
+        )
+
+        from PodcastManager.downloader import download_episode, embed_feed_artwork
+        from PodcastManager.models import PodcastEpisode
+
+        failed_items: list[SyncItem] = []
+
+        for idx, item in enumerate(pending):
+            if ctx.cancelled():
+                return
+
+            pc = item.pc_track
+            assert pc is not None
+            enc_url = pc.podcast_enclosure_url or ""
+            feed_url = pc.podcast_url or ""
+            title = pc.title or "Episode"
+
+            ctx.progress(
+                "podcast_download", idx, len(pending),
+                item, f"Downloading {title}",
+            )
+
+            # Build a minimal PodcastEpisode for the downloader
+            ep = PodcastEpisode(
+                guid=enc_url,
+                title=title,
+                audio_url=enc_url,
+            )
+
+            # Determine download destination directory
+            dest_dir = str(Path(pc.path).parent) if pc.path else ""
+            if not dest_dir:
+                import hashlib
+                url_hash = hashlib.sha256(feed_url.encode()).hexdigest()[:16]
+                try:
+                    from settings import get_settings
+                    base = get_settings().transcode_cache_dir
+                except Exception:
+                    base = ""
+                if not base:
+                    import os
+                    base = os.path.join(
+                        os.path.expanduser("~"), "iOpenPod", "cache",
+                    )
+                dest_dir = str(Path(base) / "podcasts" / url_hash)
+
+            try:
+                path = download_episode(ep, dest_dir)
+                # Embed feed artwork — look up the artwork URL from the
+                # subscription store using the feed URL.
+                try:
+                    from PodcastManager.subscription_store import SubscriptionStore
+                    # Try to find the store via the iPod path
+                    if self.ipod_path:
+                        _store = SubscriptionStore(str(self.ipod_path))
+                        _feed = _store.get_feed(feed_url)
+                        if _feed and _feed.artwork_url:
+                            embed_feed_artwork(path, _feed.artwork_url)
+                except Exception:
+                    pass
+
+                # Update the PCTrack with real file info
+                real_path = Path(path)
+                pc.path = str(real_path)
+                pc.size = real_path.stat().st_size
+                pc.mtime = real_path.stat().st_mtime
+                pc.filename = real_path.name
+                pc.relative_path = real_path.name
+                pc.extension = real_path.suffix.lower()
+
+                # Re-probe audio metadata from the actual file
+                try:
+                    from mutagen import File as MutagenFile  # type: ignore[import-untyped]
+                    audio = MutagenFile(path)
+                    if audio and audio.info:
+                        if hasattr(audio.info, 'bitrate') and audio.info.bitrate:
+                            pc.bitrate = int(audio.info.bitrate / 1000)
+                        if hasattr(audio.info, 'sample_rate') and audio.info.sample_rate:
+                            pc.sample_rate = audio.info.sample_rate
+                        if hasattr(audio.info, 'length') and audio.info.length:
+                            pc.duration_ms = int(audio.info.length * 1000)
+                except Exception:
+                    pass
+
+                # Update transcoding flag based on actual extension
+                native = {".mp3", ".m4a", ".m4b", ".aac", ".wav", ".aif", ".aiff"}
+                pc.needs_transcoding = pc.extension not in native
+
+                logger.info("Downloaded podcast: %s", title)
+
+            except Exception as exc:
+                logger.warning("Failed to download podcast %s: %s", title, exc)
+                failed_items.append(item)
+
+        # Remove failed downloads from the add list
+        if failed_items:
+            failed_set = set(id(item) for item in failed_items)
+            ctx.plan.to_add = [
+                item for item in ctx.plan.to_add
+                if id(item) not in failed_set
+            ]
+
+        ctx.progress(
+            "podcast_download", len(pending), len(pending),
+            message=f"Downloaded {len(pending) - len(failed_items)} podcast episodes",
+        )
+
     def _execute_adds(self, ctx: _SyncContext) -> None:
         if not ctx.plan.to_add:
             return
@@ -1102,8 +1319,10 @@ class SyncExecutor:
             from device_info import get_current_device
             from ipod_models import capabilities_for_family_gen
             dev = get_current_device()
-            if dev and dev.model_family and dev.generation:
-                caps = capabilities_for_family_gen(dev.model_family, dev.generation)
+            if dev and dev.model_family:
+                caps = capabilities_for_family_gen(
+                    dev.model_family, dev.generation or "",
+                )
                 if caps:
                     music_dirs = caps.music_dirs
         except Exception:
@@ -2163,9 +2382,9 @@ class SyncExecutor:
             from device_info import get_current_device
             from ipod_models import capabilities_for_family_gen
             dev = get_current_device()
-            if dev and dev.model_family and dev.generation:
+            if dev and dev.model_family:
                 capabilities = capabilities_for_family_gen(
-                    dev.model_family, dev.generation,
+                    dev.model_family, dev.generation or "",
                 )
         except Exception as exc:
             logger.debug("Could not load device capabilities: %s", exc)
@@ -2184,11 +2403,35 @@ class SyncExecutor:
             logger.exception("Failed to write iTunesDB: %s", e)
             return False
 
-        # ── SQLite databases for Nano 6G/7G ───────────────────────────
-        if capabilities and capabilities.uses_sqlite_db:
-            logger.info("Device uses SQLite databases — writing iTunes Library.itlp/")
+        # ── SQLite databases (Nano 5G/6G/7G) ─────────────────────────
+        # Write SQLite databases if the device declares uses_sqlite_db OR
+        # if the iTunes Library.itlp directory already exists (e.g. Nano 5G
+        # where iTunes created the directory but the capability flag is off).
+        itlp_dir = os.path.join(str(self.ipod_path), "iPod_Control", "iTunes", "iTunes Library.itlp")
+        has_itlp = os.path.isdir(itlp_dir)
+        if (capabilities and capabilities.uses_sqlite_db) or has_itlp:
+            logger.info("Writing SQLite databases to iTunes Library.itlp/ "
+                        "(uses_sqlite_db=%s, itlp_exists=%s)",
+                        capabilities.uses_sqlite_db if capabilities else False,
+                        has_itlp)
             try:
                 from SQLiteDB_Writer import write_sqlite_databases
+                import struct as _struct
+
+                # Extract db_pid from the CDB we just wrote so SQLite databases
+                # use the same persistent ID — firmware cross-references both.
+                db_pid = 0
+                try:
+                    from device_info import resolve_itdb_path
+                    cdb_path = resolve_itdb_path(str(self.ipod_path))
+                    if cdb_path:
+                        with open(cdb_path, "rb") as _f:
+                            _hdr = _f.read(0x20)
+                        if len(_hdr) >= 0x20 and _hdr[:4] == b"mhbd":
+                            db_pid = _struct.unpack_from('<Q', _hdr, 0x18)[0]
+                            logger.debug("Extracted db_pid=%016X from CDB for SQLite", db_pid)
+                except Exception as exc:
+                    logger.warning("Could not extract db_pid from CDB: %s", exc)
 
                 # Get FireWire ID for cbk signing
                 firewire_id = None
@@ -2204,6 +2447,7 @@ class SyncExecutor:
                     playlists=playlists,
                     smart_playlists=smart_playlists,
                     master_playlist_name=master_playlist_name,
+                    db_pid=db_pid,
                     capabilities=capabilities,
                     firewire_id=firewire_id,
                 )

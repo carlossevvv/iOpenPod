@@ -238,14 +238,14 @@ def _gapless_or_zero(value: int, capabilities) -> int:
     return value
 
 
-def write_mhit(track: TrackInfo, track_id: int, id_0x24: int = 0,
+def write_mhit(track: TrackInfo, track_id: int, db_id_2: int = 0,
                capabilities=None) -> bytes:
     """Write a complete MHIT chunk with all child MHODs.
 
     Args:
         track: TrackInfo dataclass with all track metadata.
         track_id: Unique track ID within this database.
-        id_0x24: Database-wide ID from MHBD offset 0x24 (written into every track).
+        db_id_2: Database-wide ID from MHBD offset 0x24 (written into every track).
         capabilities: Optional DeviceCapabilities for gapless/video filtering.
 
     Returns:
@@ -352,7 +352,7 @@ def write_mhit(track: TrackInfo, track_id: int, id_0x24: int = 0,
         'gapless_track_flag': _gapless_or_zero(track.gapless_track_flag, capabilities),
         'gapless_album_flag': _gapless_or_zero(track.gapless_album_flag, capabilities),
         'album_id': track.album_id,
-        'mhbd_id_ref': id_0x24,
+        'mhbd_id_ref': db_id_2,
         'size_2': track.size,
         'sort_mhod_indicators': _compute_sort_indicators(track),
         'artwork_id_ref': track.mhii_link,

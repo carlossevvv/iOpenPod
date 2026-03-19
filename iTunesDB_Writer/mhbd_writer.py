@@ -39,7 +39,7 @@ MHBD header layout (MHBD_HEADER_SIZE = 244 bytes):
     +0x18: database_id (8B)
     +0x20: platform (2B) — 1=Mac, 2=Windows
     +0x22: unk_0x22 (2B) — ~611
-    +0x24: id_0x24 (8B) — secondary ID (written in every MHIT)
+    +0x24: db_id_2 (8B) — secondary ID (written in every MHIT)
     +0x2C: unk_0x2c (4B)
     +0x30: hashing_scheme (2B) — 0=none, 1=hash58
     +0x32: unk_0x32 (20B) — zeroed before hash58
@@ -110,7 +110,7 @@ def extract_db_info(itdb_path: str) -> dict:
     - hash58/hash72: The actual hash values
 
     All keys use canonical ``field_defs`` names (e.g. ``'db_id_2'`` not
-    ``'id_0x24'``, ``'timezone_offset'`` not ``'timezone'``).
+    ``'db_id_2'``, ``'timezone_offset'`` not ``'timezone'``).
 
     Args:
         itdb_path: Path to iTunesDB file
@@ -236,11 +236,12 @@ def write_mhbd(
         else:
             db_id = generate_database_id()
 
-    # Generate id_0x24 early - needed for both the MHBD header AND every MHIT, preserved or random.
-    if reference_info and 'id_0x24' in reference_info:
-        id_0x24 = reference_info['id_0x24']
+    # Generate db_id_2 early - needed for both the MHBD header AND every MHIT, preserved or random.
+    # Field is named 'db_id_2' in the shared field definitions (offset 0x24).
+    if reference_info and 'db_id_2' in reference_info:
+        db_id_2 = reference_info['db_id_2']
     else:
-        id_0x24 = random.getrandbits(64)
+        db_id_2 = random.getrandbits(64)
 
     # Build album list first to get album IDs for tracks (Type 4 dataset)
     global_id_start_index = 1
@@ -286,7 +287,7 @@ def write_mhbd(
     # Build track list (Type 1 dataset)
     # This also returns next_track_id which tells us track IDs used
 
-    mhlt_data, next_track_id = write_mhlt(tracks, id_0x24=id_0x24, capabilities=capabilities, start_track_id=last_id + 1)
+    mhlt_data, next_track_id = write_mhlt(tracks, db_id_2=db_id_2, capabilities=capabilities, start_track_id=last_id + 1)
     mhsd_type1 = write_mhsd_type1(mhlt_data)
 
     # Collect all track IDs for the master playlist
@@ -340,7 +341,7 @@ def write_mhbd(
     remapped_playlists_type2 = [_remap_playlist(pl) for pl in (playlists_type2 or [])]
     mhsd_type2_data = write_mhlp_with_playlists(
         track_ids, playlists=remapped_playlists_type2,
-        tracks=tracks, id_0x24=id_0x24, capabilities=capabilities,
+        tracks=tracks, db_id_2=db_id_2, capabilities=capabilities,
         master_playlist_name=master_playlist_name,
         master_playlist_id=master_playlist_id,
     )
@@ -369,7 +370,7 @@ def write_mhbd(
         from .mhlp_writer import write_mhlp_with_playlists_type3
         mhsd_type3_data = write_mhlp_with_playlists_type3(
             track_ids, playlists=remapped_playlists_type2,
-            id_0x24=id_0x24, track_album_map=track_album_map,
+            db_id_2=db_id_2, track_album_map=track_album_map,
             tracks=tracks, capabilities=capabilities,
             master_playlist_name=master_playlist_name,
             next_mhip_id_start=next_track_id,
@@ -381,7 +382,7 @@ def write_mhbd(
 
     # Build smart playlist list (Type 5 dataset) — same non-mutating remap
     remapped_playlists_type5 = [_remap_playlist(pl) for pl in (playlists_type5 or [])]
-    mhsd_type5_data = write_mhlp_smart(remapped_playlists_type5, id_0x24=id_0x24)
+    mhsd_type5_data = write_mhlp_smart(remapped_playlists_type5, db_id_2=db_id_2)
     mhsd_type5 = write_mhsd_smart_type5(mhsd_type5_data)
 
     mhsd_type6 = write_mhsd_empty_stub(6)
@@ -404,12 +405,16 @@ def write_mhbd(
 
     # Determine which MHSD types the reference database uses (if any)
     ref_types: set[int] | None = None
+    ref_order: list[int] | None = None
     if reference_info and 'mhsd_types' in reference_info:
         rt = reference_info['mhsd_types']
         # Only use ref_types if extraction found meaningful data (at least type 1)
         if rt and 1 in rt:
             ref_types = rt
-        logger.debug("Reference MHSD types: %s", sorted(ref_types) if ref_types else "none (fallback to all)")
+            ref_order = reference_info.get('mhsd_order')
+        logger.debug("Reference MHSD types: %s (order: %s)",
+                     sorted(ref_types) if ref_types else "none (fallback to all)",
+                     ref_order if ref_order else "default")
 
     # Build the candidate datasets in priority order
     # Each entry: (type_number, data_bytes, required_flag)
@@ -423,21 +428,51 @@ def write_mhbd(
             return True  # no reference → include everything
         return dtype in ref_types
 
-    # Assemble datasets in libgpod order, skipping those not in the reference
+    # Map type numbers to their data blobs
+    type_to_data: dict[int, bytes] = {
+        1: mhsd_type1,
+        2: mhsd_type2,
+        3: mhsd_type3 if (include_podcasts and mhsd_type3) else b'',
+        4: mhsd_type4,
+        5: mhsd_type5,
+        6: mhsd_type6,
+        8: mhsd_type8,
+        10: mhsd_type10,
+    }
+
+    # Assemble datasets — use reference order if available, else libgpod order
     dataset_entries: list[tuple[int, bytes]] = []
-    dataset_entries.append((1, mhsd_type1))  # always required
-    if include_podcasts and _include(3):
-        dataset_entries.append((3, mhsd_type3))
-    if _include(2):
-        dataset_entries.append((2, mhsd_type2))
-    dataset_entries.append((4, mhsd_type4))  # always required
-    dataset_entries.append((8, mhsd_type8))  # always required
-    if _include(6):
-        dataset_entries.append((6, mhsd_type6))
-    if _include(10):
-        dataset_entries.append((10, mhsd_type10))
-    if _include(5):
-        dataset_entries.append((5, mhsd_type5))
+    if ref_order:
+        # Follow the exact order from the reference database
+        for dtype in ref_order:
+            if dtype not in type_to_data:
+                continue
+            # Type 3 (podcasts) requires include_podcasts flag
+            if dtype == 3 and not include_podcasts:
+                continue
+            if _include(dtype, required=(dtype in (1, 4, 8))):
+                data = type_to_data[dtype]
+                if data:
+                    dataset_entries.append((dtype, data))
+        # Add any required types that weren't in the reference order
+        for dtype in (1, 4, 8):
+            if not any(t == dtype for t, _ in dataset_entries):
+                dataset_entries.append((dtype, type_to_data[dtype]))
+    else:
+        # Default libgpod order: 1, 3, 2, 4, 8, 6, 10, 5
+        dataset_entries.append((1, mhsd_type1))  # always required
+        if include_podcasts and _include(3):
+            dataset_entries.append((3, mhsd_type3))
+        if _include(2):
+            dataset_entries.append((2, mhsd_type2))
+        dataset_entries.append((4, mhsd_type4))  # always required
+        dataset_entries.append((8, mhsd_type8))  # always required
+        if _include(6):
+            dataset_entries.append((6, mhsd_type6))
+        if _include(10):
+            dataset_entries.append((10, mhsd_type10))
+        if _include(5):
+            dataset_entries.append((5, mhsd_type5))
 
     all_datasets = b''.join(data for _, data in dataset_entries)
     child_count = len(dataset_entries)
@@ -513,7 +548,7 @@ def write_mhbd(
         'db_id': db_id,
         'platform': 2,
         'unk0x22': reference_info.get('unk0x22', 611) if reference_info else 611,
-        'db_id_2': id_0x24,
+        'db_id_2': db_id_2,
         'unk0x2c': 0,
         'hashing_scheme': 0,  # write_itunesdb() patches after checksum
         'unk0x32': unk0x32,
@@ -595,15 +630,15 @@ def write_itunesdb(
             from device_info import get_current_device
             from ipod_models import capabilities_for_family_gen
             dev = get_current_device()
-            if dev and dev.model_family and dev.generation:
+            if dev and dev.model_family:
                 capabilities = capabilities_for_family_gen(
-                    dev.model_family, dev.generation,
+                    dev.model_family, dev.generation or "",
                 )
                 if capabilities:
                     logger.debug(
                         "Auto-detected capabilities: %s %s (db_version=0x%X, "
                         "podcast=%s, gapless=%s, video=%s, music_dirs=%d)",
-                        dev.model_family, dev.generation,
+                        dev.model_family, dev.generation or "(family fallback)",
                         capabilities.db_version,
                         capabilities.supports_podcast,
                         capabilities.supports_gapless,
@@ -623,8 +658,11 @@ def write_itunesdb(
         try:
             with open(existing_itdb_path, 'rb') as f:
                 existing_itdb = f.read()
-        except Exception:
-            pass
+            logger.debug("Read existing database from %s (%d bytes)",
+                         existing_itdb_path, len(existing_itdb))
+        except Exception as exc:
+            logger.warning("Could not read existing database %s: %s",
+                           existing_itdb_path, exc)
 
     # Also read reference iTunesDB if provided
     reference_itdb = None
@@ -638,6 +676,12 @@ def write_itunesdb(
     # Try to preserve existing db_id if file exists
     if db_id is None and existing_itdb and existing_itdb[:4] == b'mhbd' and len(existing_itdb) >= 32:
         db_id = struct.unpack('<Q', existing_itdb[24:32])[0]
+        logger.debug("Preserved db_id=0x%016X from existing database", db_id)
+    elif db_id is None:
+        logger.debug("No existing database found — db_id will be generated"
+                     " (existing_itdb=%s, path=%s)",
+                     'None' if existing_itdb is None else f'{len(existing_itdb)}B',
+                     existing_itdb_path)
 
     # Extract reference info to copy device-specific fields
     reference_info = None
@@ -668,6 +712,9 @@ def write_itunesdb(
 
             # Extract reference MHSD types to match dataset structure
             # Use the decompressed view so we can see the MHSD children
+            # Store as ordered list — firmware may be sensitive to dataset order
+            # (e.g. Nano 5G expects 4,8,1,3,5 not 1,3,4,8,5)
+            ref_mhsd_order: list[int] = []
             ref_mhsd_types: set[int] = set()
             ref_hdr_len = struct.unpack('<I', source_itdb_full[4:8])[0]
             ref_cc = struct.unpack('<I', source_itdb_full[0x14:0x18])[0]
@@ -678,10 +725,13 @@ def write_itunesdb(
                 if source_itdb_full[ref_off:ref_off + 4] != b'mhsd':
                     break
                 ref_mhsd_type = struct.unpack('<I', source_itdb_full[ref_off + 12:ref_off + 16])[0]
+                if ref_mhsd_type not in ref_mhsd_types:
+                    ref_mhsd_order.append(ref_mhsd_type)
                 ref_mhsd_types.add(ref_mhsd_type)
                 ref_mhsd_total = struct.unpack('<I', source_itdb_full[ref_off + 8:ref_off + 12])[0]
                 ref_off += ref_mhsd_total
             reference_info['mhsd_types'] = ref_mhsd_types
+            reference_info['mhsd_order'] = ref_mhsd_order
 
             # Extract reference MHIT header size for matching
             _off = ref_hdr_len
@@ -942,6 +992,8 @@ def write_itunesdb(
             except Exception:
                 pass
 
+        # Write HASH72 signature
+        hash72_ok = False
         if hash_info is None:
             # Try to extract from reference database
             source_itdb = reference_itdb or existing_itdb
@@ -951,31 +1003,38 @@ def write_itunesdb(
                 if hash_dict:
                     logger.debug("  IV: %s", hash_dict['iv'].hex())
                     logger.debug("  rndpart: %s", hash_dict['rndpart'].hex())
-
-                    # Compute SHA1 of new database
                     sha1 = _compute_itunesdb_sha1(itdb_data)
-
-                    # Generate new signature
                     signature = _hash_generate(sha1, hash_dict['iv'], hash_dict['rndpart'])
-
-                    # Write to database
                     itdb_data[0x72:0x72 + 46] = signature
-                    # Set hash_scheme=1 to match iTunes behavior
-                    # (iTunes writes both hash58 and hash72, with hash_scheme=1)
-                    struct.pack_into('<H', itdb_data, MHBD_OFFSET_HASHING_SCHEME, 1)
                     logger.info("HASH72 signature written successfully")
+                    hash72_ok = True
                 else:
                     logger.warning("Could not extract hash info from reference database")
             else:
                 logger.warning("No HashInfo file and no reference database available")
         else:
-            # Use existing HashInfo file
             sha1 = _compute_itunesdb_sha1(itdb_data)
             signature = _hash_generate(sha1, hash_info.iv, hash_info.rndpart)
             itdb_data[0x72:0x72 + 46] = signature
-            # Set hash_scheme=1 to match iTunes behavior
-            struct.pack_into('<H', itdb_data, MHBD_OFFSET_HASHING_SCHEME, 1)
             logger.info("HASH72 signature written from HashInfo file")
+            hash72_ok = True
+
+        # iTunes writes BOTH hash72 and hash58 with hash_scheme=1.
+        # The firmware checks hash58 when hash_scheme=1, so we must also
+        # write hash58 AFTER hash72 (hash58 computation preserves hash72).
+        if hash72_ok:
+            struct.pack_into('<H', itdb_data, MHBD_OFFSET_HASHING_SCHEME, 1)
+            if firewire_id is None:
+                try:
+                    from device_info import get_firewire_id
+                    firewire_id = get_firewire_id(ipod_path)
+                except Exception as e:
+                    logger.warning("Could not get FireWire ID for HASH58: %s", e)
+            if firewire_id:
+                write_hash58(itdb_data, firewire_id)
+                logger.info("HASH58 signature also written (FireWire ID: %s)", firewire_id.hex())
+            else:
+                logger.warning("No FireWire ID — hash58 left empty, device may reject database")
 
     elif checksum_type == ChecksumType.HASHAB:
         # iPod Nano 6G/7G — white-box AES via WASM module
@@ -1019,8 +1078,18 @@ def write_itunesdb(
         if pending_artwork:
             pending_artwork.abort()
         return False
+    elif checksum_type == ChecksumType.UNKNOWN:
+        logger.error(
+            "Cannot write iTunesDB: device checksum type is UNKNOWN. "
+            "The device was not fully identified — the iPod will reject "
+            "this database. Please report this as a bug."
+        )
+        if pending_artwork:
+            pending_artwork.abort()
+        return False
+
     else:
-        # ChecksumType.NONE or UNKNOWN - set hash_scheme to 0
+        # ChecksumType.NONE — pre-2007 devices that need no hash
         struct.pack_into('<H', itdb_data, MHBD_OFFSET_HASHING_SCHEME, 0)
 
     # Backup existing file(s)

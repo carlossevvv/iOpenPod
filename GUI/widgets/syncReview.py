@@ -24,7 +24,7 @@ from SyncEngine.eta import ETATracker
 
 from .formatters import format_size as _format_size, format_duration_mmss as _format_duration
 from ..glyphs import glyph_pixmap
-from ..styles import Colors, FONT_FAMILY, Metrics, btn_css, scrollbar_css
+from ..styles import Colors, FONT_FAMILY, Metrics, btn_css, make_scroll_area
 
 import os
 import logging
@@ -1156,17 +1156,8 @@ class SyncReviewWidget(QWidget):
         content_layout.addWidget(self._storage_frame)
 
         # Scroll area for category cards
-        self._scroll = QScrollArea(content_widget)
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet(f"""
-            QScrollArea {{
-                background: transparent;
-                border: none;
-            }}
-            {scrollbar_css()}
-        """)
+        self._scroll = make_scroll_area()
+        self._scroll.setParent(content_widget)
 
         self._cards_container = QWidget(self._scroll)
         self._cards_container.setStyleSheet("background: transparent;")
@@ -2257,7 +2248,12 @@ class SyncReviewWidget(QWidget):
             and bool(self._plan.playlists_to_add or self._plan.playlists_to_edit or self._plan.playlists_to_remove)
         )
 
-        if not selected_items and not playlists_selected:
+        has_integrity_fixes = (
+            self._plan is not None
+            and bool(getattr(self._plan, '_integrity_removals', []))
+        )
+
+        if not selected_items and not playlists_selected and not has_integrity_fixes:
             QMessageBox.information(self, "No Selection", "Please select items to sync.")
             return
 
@@ -2297,6 +2293,10 @@ class SyncReviewWidget(QWidget):
                 msg_parts.append(f"Update {pl_edit} playlists")
             if pl_remove:
                 msg_parts.append(f"Remove {pl_remove} playlists")
+
+        if has_integrity_fixes:
+            n = len(self._plan._integrity_removals)
+            msg_parts.append(f"Clean {n} ghost tracks (missing files) from database")
 
         msg = "This will:\n• " + "\n• ".join(msg_parts) + "\n\nContinue?"
 

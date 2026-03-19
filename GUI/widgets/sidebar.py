@@ -12,7 +12,7 @@ from ..styles import (
     btn_css, accent_btn_css,
     sidebar_nav_css, sidebar_nav_selected_css, toolbar_btn_css,
     LABEL_PRIMARY, LABEL_SECONDARY, LABEL_TERTIARY,
-    make_separator, make_section_header,
+    make_separator, make_section_header, make_scroll_area,
 )
 
 
@@ -606,12 +606,7 @@ class Sidebar(QFrame):
         self.sidebarLayout.addWidget(make_separator())
 
         # ── Scrollable library section ──────────────────────────────
-        lib_scroll = QScrollArea()
-        lib_scroll.setWidgetResizable(True)
-        lib_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        lib_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        lib_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        lib_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        lib_scroll = make_scroll_area()
 
         lib_container = QWidget()
         lib_container.setStyleSheet("background: transparent;")

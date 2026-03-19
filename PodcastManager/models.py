@@ -38,6 +38,7 @@ class PodcastEpisode:
     ipod_db_id: int = 0                 # iTunesDB db_id when synced to iPod
 
     def to_dict(self) -> dict:
+        """Full serialization — used for in-memory transfer and RSS merge."""
         return {
             "guid": self.guid,
             "title": self.title,
@@ -48,6 +49,23 @@ class PodcastEpisode:
             "size_bytes": self.size_bytes,
             "episode_number": self.episode_number,
             "season_number": self.season_number,
+            "status": self.status,
+            "downloaded_path": self.downloaded_path,
+            "ipod_db_id": self.ipod_db_id,
+        }
+
+    def to_dict_stored(self) -> dict:
+        """Minimal serialization for on-iPod persistence.
+
+        Only includes fields needed for identity, display when offline,
+        and sync matching.  Full metadata comes from RSS on refresh.
+        """
+        return {
+            "guid": self.guid,
+            "title": self.title,
+            "audio_url": self.audio_url,
+            "pub_date": self.pub_date,
+            "duration_seconds": self.duration_seconds,
             "status": self.status,
             "downloaded_path": self.downloaded_path,
             "ipod_db_id": self.ipod_db_id,
@@ -87,22 +105,75 @@ class PodcastFeed:
 
     episodes: list[PodcastEpisode] = field(default_factory=list)
 
+    # ── Per-feed sync settings ───────────────────────────────────────────
+    episode_slots: int = 3
+    """Maximum number of episodes to keep on the iPod for this feed."""
+
+    fill_mode: str = "newest"
+    """How to fill available episode slots.
+
+    ``"newest"``  — always pick the most recently published episode.
+    ``"next"``    — pick the next unheard episode (oldest on iPod + 1;
+                    if none on iPod, pick the oldest retrieved episode).
+    """
+
+    clear_when_listened: bool = True
+    """Remove an episode from its slot after it has been marked played."""
+
+    clear_older_than: str = "never"
+    """Auto-clear episodes older than a threshold (by date added to iPod).
+
+    One of: ``"1_day"``, ``"3_days"``, ``"1_week"``, ``"2_weeks"``,
+    ``"1_month"``, ``"2_months"``, ``"3_months"``, ``"never"``.
+    """
+
+    clear_method: str = "remove"
+    """What to do when a slot is cleared.
+
+    ``"remove"``  — delete the episode from the iPod immediately.
+    ``"replace"`` — mark the slot for replacement on the next sync
+                    (the episode stays on the iPod until a new one
+                    fills its slot).
+    """
+
     def to_dict(self) -> dict:
+        """Serialize for on-iPod persistence.
+
+        Only includes episodes that have meaningful local state
+        (downloaded or on iPod).  Episodes with status
+        ``"not_downloaded"`` are omitted — they come from RSS on
+        refresh.  Feed description is also omitted (fetched from RSS).
+        """
+        stored_episodes = [
+            ep.to_dict_stored()
+            for ep in self.episodes
+            if ep.status in (STATUS_DOWNLOADED, STATUS_DOWNLOADING,
+                             STATUS_ON_IPOD)
+        ]
         return {
             "feed_url": self.feed_url,
             "title": self.title,
             "author": self.author,
-            "description": self.description,
             "artwork_url": self.artwork_url,
-            "artwork_path": self.artwork_path,
             "category": self.category,
             "language": self.language,
             "last_refreshed": self.last_refreshed,
-            "episodes": [ep.to_dict() for ep in self.episodes],
+            "episodes": stored_episodes,
+            "episode_slots": self.episode_slots,
+            "fill_mode": self.fill_mode,
+            "clear_when_listened": self.clear_when_listened,
+            "clear_older_than": self.clear_older_than,
+            "clear_method": self.clear_method,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> PodcastFeed:
+        """Deserialize from on-iPod JSON.
+
+        Episodes loaded here are only those with local state (on iPod
+        or downloaded).  The full catalog is populated when the RSS
+        feed is refreshed and merged.
+        """
         episodes = [PodcastEpisode.from_dict(e) for e in d.get("episodes", [])]
         return cls(
             feed_url=d["feed_url"],
@@ -115,6 +186,11 @@ class PodcastFeed:
             language=d.get("language", ""),
             last_refreshed=d.get("last_refreshed", 0.0),
             episodes=episodes,
+            episode_slots=d.get("episode_slots", 3),
+            fill_mode=d.get("fill_mode", "newest"),
+            clear_when_listened=d.get("clear_when_listened", True),
+            clear_older_than=d.get("clear_older_than", "never"),
+            clear_method=d.get("clear_method", "remove"),
         )
 
     @property
