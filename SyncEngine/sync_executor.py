@@ -64,6 +64,25 @@ class _OutOfSpaceError(Exception):
     pass
 
 
+def _current_source_stat(pc_track) -> tuple[int, float]:
+    """Re-stat the PC source file to get its current size and mtime.
+
+    The fingerprinting phase writes the acoustic fingerprint tag back
+    into the source file (FLAC, OGG, etc.), which changes its size and
+    mtime *after* the initial scan.  If we record the pre-fingerprint
+    values in the mapping, the next sync sees a "changed" file and
+    re-copies/re-transcodes unnecessarily.
+
+    Falls back to the values from the scan if stat fails (e.g. the
+    file was on removable media that's gone).
+    """
+    try:
+        st = os.stat(pc_track.path)
+        return st.st_size, st.st_mtime
+    except OSError:
+        return pc_track.size, pc_track.mtime
+
+
 @dataclass
 class SyncProgress:
     """Progress info for sync callbacks."""
@@ -161,7 +180,7 @@ class _SyncContext:
     existing_smart_raw: list[dict] = field(default_factory=list)
 
     # ── Track state (mutated by stage methods) ──────────────────────
-    tracks_by_dbid: dict[int, TrackInfo] = field(default_factory=dict)
+    tracks_by_db_id: dict[int, TrackInfo] = field(default_factory=dict)
     tracks_by_location: dict[str, TrackInfo] = field(default_factory=dict)
     new_tracks: list[TrackInfo] = field(default_factory=list)
 
@@ -209,7 +228,7 @@ class SyncExecutor:
         self.ipod_path = Path(ipod_path)
         self.music_dir = self.ipod_path / "iPod_Control" / "Music"
         self.mapping_manager = MappingManager(ipod_path)
-        self.transcode_cache = TranscodeCache(cache_dir)
+        self.transcode_cache = TranscodeCache.get_instance(cache_dir)
 
         self._folder_counter = 0
         self._folder_lock = threading.Lock()
@@ -275,6 +294,7 @@ class SyncExecutor:
             self._execute_file_updates,     # Stage 2
             self._execute_metadata_updates,  # Stage 3
             self._execute_artwork_updates,  # Stage 3b
+            self._download_podcast_episodes,  # Stage 3c (podcast prep)
             self._execute_adds,             # Stage 4
             self._execute_sound_check,      # Stage 4b
             self._execute_playcount_sync,   # Stage 5
@@ -353,8 +373,8 @@ class SyncExecutor:
 
         for t in ctx.existing_tracks_data:
             track_info = self._track_dict_to_info(t)
-            if track_info.dbid:
-                ctx.tracks_by_dbid[track_info.dbid] = track_info
+            if track_info.db_id:
+                ctx.tracks_by_db_id[track_info.db_id] = track_info
             if track_info.location:
                 ctx.tracks_by_location[track_info.location] = track_info
 
@@ -366,15 +386,15 @@ class SyncExecutor:
         """Stage 7: assemble final track list, write database, backpatch and finalize."""
         ctx.progress("write_database", 0, 1, message="Writing database...")
 
-        all_tracks = list(ctx.tracks_by_dbid.values()) + ctx.new_tracks
+        all_tracks = list(ctx.tracks_by_db_id.values()) + ctx.new_tracks
 
-        # ── Pre-assign dbids for new tracks ──────────────────────
-        # New tracks arrive with dbid=0.  Assign now so
+        # ── Pre-assign db_ids for new tracks ──────────────────────
+        # New tracks arrive with db_id=0.  Assign now so
         # _build_and_evaluate_playlists can build correct track lists.
-        from iTunesDB_Writer.mhit_writer import generate_dbid
+        from iTunesDB_Writer.mhit_writer import generate_db_id
         for t in all_tracks:
-            if not t.dbid:
-                t.dbid = generate_dbid()
+            if not t.db_id:
+                t.db_id = generate_db_id()
 
         # ── Auto-detect gapless_album_flag ────────────────────────
         albums: dict[tuple[str, str], list[TrackInfo]] = defaultdict(list)
@@ -414,11 +434,14 @@ class SyncExecutor:
             ctx.progress("write_database", 1, 1,
                          message=f"Database written with {len(all_tracks)} tracks")
 
-            # ── Backpatch: new tracks now have real dbids ──
+            # ── Backpatch: new tracks now have real db_ids ──
             self._backpatch_new_tracks(ctx)
 
             # Save mapping ONLY after successful DB write + backpatch.
             self.mapping_manager.save(ctx.mapping)
+
+            # ── Update podcast subscription store ──────────────────
+            self._update_podcast_subscriptions(ctx)
 
             self._clear_gui_cache(ctx)
 
@@ -469,24 +492,94 @@ class SyncExecutor:
                          message=f"Merged playlist: {upl.get('Title', '?')}")
 
     def _backpatch_new_tracks(self, ctx: _SyncContext) -> None:
-        """Create mapping entries for newly added tracks (dbids now assigned)."""
+        """Create mapping entries for newly added tracks (db_ids now assigned)."""
         for track in ctx.new_tracks:
             obj_key = id(track)
             fp = ctx.new_track_fingerprints.get(obj_key)
             info = ctx.new_track_info.get(obj_key)
-            if fp and info and track.dbid != 0:
+            if fp and info and track.db_id != 0:
                 pc_track, ipod_dest, was_transcoded = info
+                # Re-stat the source file to capture post-fingerprint
+                # size/mtime.  The fingerprinting phase may have written
+                # the acoustic fingerprint tag back into the source file,
+                # changing its size and mtime after the initial scan.
+                source_size, source_mtime = _current_source_stat(pc_track)
                 ctx.mapping.add_track(
                     fingerprint=fp,
-                    dbid=track.dbid,
+                    db_id=track.db_id,
                     source_format=Path(pc_track.path).suffix.lstrip("."),
                     ipod_format=ipod_dest.suffix.lstrip("."),
-                    source_size=pc_track.size,
-                    source_mtime=pc_track.mtime,
+                    source_size=source_size,
+                    source_mtime=source_mtime,
                     was_transcoded=was_transcoded,
                     source_path_hint=pc_track.relative_path,
                     art_hash=getattr(pc_track, "art_hash", None),
                 )
+
+    def _update_podcast_subscriptions(self, ctx: _SyncContext) -> None:
+        """Mark added podcast episodes as on_ipod and removed ones as downloaded
+        in the subscription store so the state persists across sessions."""
+        try:
+            from PodcastManager.subscription_store import SubscriptionStore
+            from PodcastManager.models import STATUS_ON_IPOD, STATUS_DOWNLOADED
+        except ImportError:
+            return
+
+        store = SubscriptionStore(str(self.ipod_path))
+        feeds = store.get_feeds()
+        if not feeds:
+            return
+
+        # Index episodes by enclosure URL across all feeds
+        ep_by_url: dict[str, tuple] = {}
+        for feed in feeds:
+            for ep in feed.episodes:
+                if ep.audio_url:
+                    ep_by_url[ep.audio_url] = (ep, feed)
+
+        changed = False
+
+        # Mark added podcast episodes as on_ipod with their db_id
+        for track in ctx.new_tracks:
+            if not (track.media_type & 0x04):
+                continue
+            enc_url = track.podcast_enclosure_url or ""
+            if not enc_url:
+                continue
+            entry = ep_by_url.get(enc_url)
+            if entry:
+                ep, _feed = entry
+                ep.status = STATUS_ON_IPOD
+                ep.ipod_db_id = track.db_id
+                changed = True
+                logger.debug("Podcast subscription: marked '%s' as on_ipod (db_id=%d)",
+                             ep.title, track.db_id)
+
+        # Mark removed podcast episodes as downloaded (no longer on iPod)
+        all_removals = list(ctx.plan.to_remove) + list(
+            getattr(ctx.plan, '_integrity_removals', [])
+        )
+        for item in all_removals:
+            ipod_track = item.ipod_track
+            if not ipod_track:
+                continue
+            if not (ipod_track.get("media_type", 0) & 0x04):
+                continue
+            enc_url = ipod_track.get("Podcast Enclosure URL", "")
+            if not enc_url:
+                continue
+            entry = ep_by_url.get(enc_url)
+            if entry:
+                ep, _feed = entry
+                ep.status = STATUS_DOWNLOADED if ep.downloaded_path else "not_downloaded"
+                ep.ipod_db_id = 0
+                changed = True
+                logger.debug("Podcast subscription: marked '%s' as removed from iPod",
+                             ep.title)
+
+        if changed:
+            store.update_feeds(feeds)
+            logger.info("Updated podcast subscription store after sync")
 
     @staticmethod
     def _clear_gui_cache(ctx: _SyncContext) -> None:
@@ -501,16 +594,28 @@ class SyncExecutor:
     # ── Stage Implementations ───────────────────────────────────────────────
 
     def _execute_removes(self, ctx: _SyncContext) -> None:
-        if not ctx.plan.to_remove:
+        # Combine user-selected removals with mandatory integrity removals
+        # (ghost tracks whose files are missing from iPod).
+        all_removes = list(ctx.plan.to_remove)
+        integrity_removals = getattr(ctx.plan, '_integrity_removals', [])
+        if integrity_removals:
+            # Deduplicate by db_id in case any overlap
+            existing_db_ids = {item.db_id for item in all_removes if item.db_id}
+            for item in integrity_removals:
+                if item.db_id and item.db_id not in existing_db_ids:
+                    all_removes.append(item)
+                    existing_db_ids.add(item.db_id)
+
+        if not all_removes:
             return
 
-        ctx.progress("remove", 0, len(ctx.plan.to_remove), message="Removing tracks...")
+        ctx.progress("remove", 0, len(all_removes), message="Removing tracks...")
 
-        for i, item in enumerate(ctx.plan.to_remove):
+        for i, item in enumerate(all_removes):
             if ctx.cancelled():
                 return
 
-            ctx.progress("remove", i + 1, len(ctx.plan.to_remove), item, item.description)
+            ctx.progress("remove", i + 1, len(all_removes), item, item.description)
 
             if ctx.dry_run:
                 ctx.result.tracks_removed += 1
@@ -525,21 +630,21 @@ class SyncExecutor:
 
                     if file_path in ctx.tracks_by_location:
                         track_to_remove = ctx.tracks_by_location.pop(file_path)
-                        if track_to_remove.dbid in ctx.tracks_by_dbid:
-                            del ctx.tracks_by_dbid[track_to_remove.dbid]
+                        if track_to_remove.db_id in ctx.tracks_by_db_id:
+                            del ctx.tracks_by_db_id[track_to_remove.db_id]
 
             if item.fingerprint:
-                ctx.mapping.remove_track(item.fingerprint, dbid=item.dbid)
-            elif item.dbid:
-                ctx.mapping.remove_by_dbid(item.dbid)
+                ctx.mapping.remove_track(item.fingerprint, db_id=item.db_id)
+            elif item.db_id:
+                ctx.mapping.remove_by_db_id(item.db_id)
 
-            if item.dbid and item.dbid in ctx.tracks_by_dbid:
-                del ctx.tracks_by_dbid[item.dbid]
+            if item.db_id and item.db_id in ctx.tracks_by_db_id:
+                del ctx.tracks_by_db_id[item.db_id]
 
             ctx.result.tracks_removed += 1
 
-        for fp, dbid in getattr(ctx.plan, '_stale_mapping_entries', []):
-            ctx.mapping.remove_track(fp, dbid=dbid)
+        for fp, db_id in getattr(ctx.plan, '_stale_mapping_entries', []):
+            ctx.mapping.remove_track(fp, db_id=db_id)
 
     def _parallel_copy_stage(
         self,
@@ -717,9 +822,9 @@ class SyncExecutor:
             source_path = Path(item.pc_track.path)
 
             # Update existing TrackInfo
-            dbid = item.dbid
-            if dbid and dbid in ctx.tracks_by_dbid:
-                existing_track = ctx.tracks_by_dbid[dbid]
+            db_id = item.db_id
+            if db_id and db_id in ctx.tracks_by_db_id:
+                existing_track = ctx.tracks_by_db_id[db_id]
                 if existing_track.location in ctx.tracks_by_location:
                     del ctx.tracks_by_location[existing_track.location]
                 existing_track.location = ipod_location
@@ -747,17 +852,18 @@ class SyncExecutor:
 
                 ctx.tracks_by_location[ipod_location] = existing_track
 
-            if dbid:
-                ctx.pc_file_paths[dbid] = str(source_path)
+            if db_id:
+                ctx.pc_file_paths[db_id] = str(source_path)
 
             if item.fingerprint and ipod_path:
+                source_size, source_mtime = _current_source_stat(item.pc_track)
                 ctx.mapping.add_track(
                     fingerprint=item.fingerprint,
-                    dbid=dbid or 0,
+                    db_id=db_id or 0,
                     source_format=source_path.suffix.lstrip("."),
                     ipod_format=ipod_path.suffix.lstrip("."),
-                    source_size=item.pc_track.size,
-                    source_mtime=item.pc_track.mtime,
+                    source_size=source_size,
+                    source_mtime=source_mtime,
                     was_transcoded=was_transcoded,
                     source_path_hint=item.pc_track.relative_path,
                     art_hash=getattr(item.pc_track, "art_hash", None),
@@ -847,9 +953,9 @@ class SyncExecutor:
                 ctx.result.tracks_updated_metadata += 1
                 continue
 
-            dbid = item.dbid
-            if dbid and dbid in ctx.tracks_by_dbid:
-                track = ctx.tracks_by_dbid[dbid]
+            db_id = item.db_id
+            if db_id and db_id in ctx.tracks_by_db_id:
+                track = ctx.tracks_by_db_id[db_id]
                 for field_name, (pc_value, _ipod_value) in item.metadata_changes.items():
                     mapping_entry = self._META_FIELD_MAP.get(field_name)
                     if mapping_entry is not None:
@@ -865,16 +971,17 @@ class SyncExecutor:
 
             # Refresh mapping mtime/size so next sync doesn't see a spurious file change
             if item.fingerprint and item.pc_track and not ctx.dry_run:
-                fp_result = ctx.mapping.get_by_dbid(dbid) if dbid else None
+                fp_result = ctx.mapping.get_by_db_id(db_id) if db_id else None
                 if fp_result:
                     fp, existing = fp_result
+                    source_size, source_mtime = _current_source_stat(item.pc_track)
                     ctx.mapping.add_track(
                         fingerprint=fp,
-                        dbid=dbid or 0,
+                        db_id=db_id or 0,
                         source_format=existing.source_format,
                         ipod_format=existing.ipod_format,
-                        source_size=item.pc_track.size,
-                        source_mtime=item.pc_track.mtime,
+                        source_size=source_size,
+                        source_mtime=source_mtime,
                         was_transcoded=existing.was_transcoded,
                         source_path_hint=item.pc_track.relative_path,
                         art_hash=existing.art_hash,
@@ -896,12 +1003,12 @@ class SyncExecutor:
         for item in ctx.plan.to_update_artwork:
             if not item.fingerprint:
                 continue
-            fp_result = ctx.mapping.get_by_dbid(item.dbid) if item.dbid else None
+            fp_result = ctx.mapping.get_by_db_id(item.db_id) if item.db_id else None
             if fp_result:
                 fp, existing = fp_result
                 ctx.mapping.add_track(
                     fingerprint=fp,
-                    dbid=item.dbid or 0,
+                    db_id=item.db_id or 0,
                     source_format=existing.source_format,
                     ipod_format=existing.ipod_format,
                     source_size=existing.source_size,
@@ -910,6 +1017,140 @@ class SyncExecutor:
                     source_path_hint=existing.source_path_hint,
                     art_hash=item.new_art_hash,
                 )
+
+    def _download_podcast_episodes(self, ctx: _SyncContext) -> None:
+        """Download podcast episodes that were selected in the plan but
+        don't have local files yet.  Runs before the add stage so the
+        copy/transcode pipeline has real files to work with.
+        """
+        if not ctx.plan.to_add:
+            return
+
+        # Identify podcast add items whose source file is missing
+        pending: list[SyncItem] = []
+        for item in ctx.plan.to_add:
+            if item.pc_track is None:
+                continue
+            if not getattr(item.pc_track, "is_podcast", False):
+                continue
+            source = Path(item.pc_track.path) if item.pc_track.path else None
+            if source and source.exists():
+                continue
+            # Needs downloading
+            enc_url = getattr(item.pc_track, "podcast_enclosure_url", "")
+            if enc_url:
+                pending.append(item)
+
+        if not pending:
+            return
+
+        ctx.progress(
+            "podcast_download", 0, len(pending),
+            message=f"Downloading {len(pending)} podcast episodes...",
+        )
+
+        from PodcastManager.downloader import download_episode, embed_feed_artwork
+        from PodcastManager.models import PodcastEpisode
+
+        failed_items: list[SyncItem] = []
+
+        for idx, item in enumerate(pending):
+            if ctx.cancelled():
+                return
+
+            pc = item.pc_track
+            assert pc is not None
+            enc_url = pc.podcast_enclosure_url or ""
+            feed_url = pc.podcast_url or ""
+            title = pc.title or "Episode"
+
+            ctx.progress(
+                "podcast_download", idx, len(pending),
+                item, f"Downloading {title}",
+            )
+
+            # Build a minimal PodcastEpisode for the downloader
+            ep = PodcastEpisode(
+                guid=enc_url,
+                title=title,
+                audio_url=enc_url,
+            )
+
+            # Determine download destination directory
+            dest_dir = str(Path(pc.path).parent) if pc.path else ""
+            if not dest_dir:
+                import hashlib
+                url_hash = hashlib.sha256(feed_url.encode()).hexdigest()[:16]
+                try:
+                    from settings import get_settings
+                    base = get_settings().transcode_cache_dir
+                except Exception:
+                    base = ""
+                if not base:
+                    from settings import _default_cache_dir
+                    base = _default_cache_dir()
+                dest_dir = str(Path(base) / "podcasts" / url_hash)
+
+            try:
+                path = download_episode(ep, dest_dir)
+                # Embed feed artwork — look up the artwork URL from the
+                # subscription store using the feed URL.
+                try:
+                    from PodcastManager.subscription_store import SubscriptionStore
+                    # Try to find the store via the iPod path
+                    if self.ipod_path:
+                        _store = SubscriptionStore(str(self.ipod_path))
+                        _feed = _store.get_feed(feed_url)
+                        if _feed and _feed.artwork_url:
+                            embed_feed_artwork(path, _feed.artwork_url)
+                except Exception:
+                    pass
+
+                # Update the PCTrack with real file info
+                real_path = Path(path)
+                pc.path = str(real_path)
+                pc.size = real_path.stat().st_size
+                pc.mtime = real_path.stat().st_mtime
+                pc.filename = real_path.name
+                pc.relative_path = real_path.name
+                pc.extension = real_path.suffix.lower()
+
+                # Re-probe audio metadata from the actual file
+                try:
+                    from mutagen import File as MutagenFile  # type: ignore[import-untyped]
+                    audio = MutagenFile(path)
+                    if audio and audio.info:
+                        if hasattr(audio.info, 'bitrate') and audio.info.bitrate:
+                            pc.bitrate = int(audio.info.bitrate / 1000)
+                        if hasattr(audio.info, 'sample_rate') and audio.info.sample_rate:
+                            pc.sample_rate = audio.info.sample_rate
+                        if hasattr(audio.info, 'length') and audio.info.length:
+                            pc.duration_ms = int(audio.info.length * 1000)
+                except Exception:
+                    pass
+
+                # Update transcoding flag based on actual extension
+                native = {".mp3", ".m4a", ".m4b", ".aac", ".wav", ".aif", ".aiff"}
+                pc.needs_transcoding = pc.extension not in native
+
+                logger.info("Downloaded podcast: %s", title)
+
+            except Exception as exc:
+                logger.warning("Failed to download podcast %s: %s", title, exc)
+                failed_items.append(item)
+
+        # Remove failed downloads from the add list
+        if failed_items:
+            failed_set = set(id(item) for item in failed_items)
+            ctx.plan.to_add = [
+                item for item in ctx.plan.to_add
+                if id(item) not in failed_set
+            ]
+
+        ctx.progress(
+            "podcast_download", len(pending), len(pending),
+            message=f"Downloaded {len(pending) - len(failed_items)} podcast episodes",
+        )
 
     def _execute_adds(self, ctx: _SyncContext) -> None:
         if not ctx.plan.to_add:
@@ -974,8 +1215,8 @@ class SyncExecutor:
                 pc_track, _ipod_path, _was_transcoded = info
                 candidates.append((t, pc_track.path))
 
-        for dbid, pc_path in ctx.pc_file_paths.items():
-            t = ctx.tracks_by_dbid.get(dbid)
+        for db_id, pc_path in ctx.pc_file_paths.items():
+            t = ctx.tracks_by_db_id.get(db_id)
             if t and not t.sound_check and t.media_type not in VIDEO_TYPES:
                 candidates.append((t, pc_path))
 
@@ -1079,9 +1320,9 @@ class SyncExecutor:
                 ctx.result.ratings_synced += 1
                 continue
 
-            dbid = item.dbid
-            if dbid and dbid in ctx.tracks_by_dbid and item.new_rating is not None:
-                ctx.tracks_by_dbid[dbid].rating = item.new_rating
+            db_id = item.db_id
+            if db_id and db_id in ctx.tracks_by_db_id and item.new_rating is not None:
+                ctx.tracks_by_db_id[db_id].rating = item.new_rating
 
             if ctx.write_back_to_pc and item.pc_track and item.new_rating is not None:
                 self._write_rating_to_pc(item.pc_track.path, item.new_rating)
@@ -1102,8 +1343,10 @@ class SyncExecutor:
             from device_info import get_current_device
             from ipod_models import capabilities_for_family_gen
             dev = get_current_device()
-            if dev and dev.model_family and dev.generation:
-                caps = capabilities_for_family_gen(dev.model_family, dev.generation)
+            if dev and dev.model_family:
+                caps = capabilities_for_family_gen(
+                    dev.model_family, dev.generation or "",
+                )
                 if caps:
                     music_dirs = caps.music_dirs
         except Exception:
@@ -1193,6 +1436,7 @@ class SyncExecutor:
             if fingerprint:
                 cached_path = self.transcode_cache.get(
                     fingerprint, target_format, source_size, bitrate,
+                    source_path=source_path,
                 )
                 if cached_path:
                     ext = cached_path.suffix
@@ -1241,6 +1485,7 @@ class SyncExecutor:
                         target_format=target_format,
                         source_size=source_size,
                         bitrate=bitrate,
+                        source_path=source_path,
                     )
 
                 # Copy to iPod (the actual bottleneck — USB I/O)
@@ -1609,7 +1854,7 @@ class SyncExecutor:
             last_played=t.get("last_played", 0),
             last_skipped=t.get("last_skipped", 0),
             last_modified=t.get("last_modified", 0),
-            dbid=t.get("db_id", 0),
+            db_id=t.get("db_id", 0),
             media_type=t.get("media_type", 1),
             movie_file_flag=t.get("movie_flag", 0),
             season_number=t.get("season_number", 0),
@@ -1685,7 +1930,11 @@ class SyncExecutor:
             if filetype == "m4a" and not is_lossless_source:
                 from .transcoder import quality_to_nominal_bitrate
                 bitrate = quality_to_nominal_bitrate(self._aac_quality)
-            # sample_rate is typically preserved by transcoder
+            # Transcoded audio is capped at IPOD_MAX_SAMPLE_RATE; reflect that
+            # in the stored sample_rate so iTunesDB is consistent with the file.
+            if filetype == "m4a":
+                from .transcoder import IPOD_MAX_SAMPLE_RATE as _MAX_SR
+                sample_rate = min(sample_rate, _MAX_SR)
 
         # ── Media type auto-detection ────────────────────────────────
         is_video = getattr(pc_track, "is_video", False)
@@ -1727,8 +1976,36 @@ class SyncExecutor:
         postgap = getattr(pc_track, "postgap", 0) or 0
         sample_count = getattr(pc_track, "sample_count", 0) or 0
         gapless_data = getattr(pc_track, "gapless_data", 0) or 0
-        # Auto-set gapless_track_flag when we have meaningful gapless data
-        gapless_track_flag = 1 if (pregap or postgap or sample_count) else 0
+        if was_transcoded:
+            # Prefer probing the actual output file — it gives us values at the
+            # correct sample rate with no floating-point error, and for files
+            # encoded by Apple's Core Audio (aac_at on macOS) we also get exact
+            # pregap/postgap from the iTunSMPB atom.
+            if ipod_file_path and ipod_file_path.exists():
+                from .pc_library import probe_gapless_info
+                probed = probe_gapless_info(ipod_file_path)
+                if probed.get("sample_rate"):
+                    sample_rate = probed["sample_rate"]
+                if probed.get("sample_count"):
+                    sample_count = probed["sample_count"]
+                    pregap = probed.get("pregap", 0)
+                    postgap = probed.get("postgap", 0)
+            else:
+                # Fallback: the output file isn't available yet (dry-run, etc.).
+                # Scale source values to the output sample rate to avoid the
+                # early-cutoff bug described in the transcoder fix.
+                src_sr = pc_track.sample_rate or 44100
+                if src_sr != sample_rate:
+                    ratio = sample_rate / src_sr
+                    if sample_count:
+                        sample_count = round(sample_count * ratio)
+                    if pregap:
+                        pregap = round(pregap * ratio)
+                    if postgap:
+                        postgap = round(postgap * ratio)
+        # Gapless playback flag is OFF by default.
+        # Only enable it when explicitly provided by metadata/user intent.
+        gapless_track_flag = int(getattr(pc_track, "gapless_track_flag", 0) or 0)
         # encoder_flag: set to 1 for MP3 (iPod needs this for LAME gapless)
         encoder_flag = 1 if filetype == "mp3" else 0
         # VBR detection from mutagen bitrate_mode
@@ -1827,28 +2104,28 @@ class SyncExecutor:
         """
         from .spl_evaluator import spl_update
 
-        old_tid_to_dbid: dict[int, int] = {}
+        old_tid_to_db_id: dict[int, int] = {}
         for t in ctx.existing_tracks_data:
             tid = t.get("track_id", 0)
-            dbid = t.get("db_id", 0)
-            if tid and dbid:
-                old_tid_to_dbid[tid] = dbid
+            db_id = t.get("db_id", 0)
+            if tid and db_id:
+                old_tid_to_db_id[tid] = db_id
 
-        valid_dbids: set[int] = {t.dbid for t in all_track_infos if t.dbid}
+        valid_db_ids: set[int] = {t.db_id for t in all_track_infos if t.db_id}
         eval_tracks = [self._trackinfo_to_eval_dict(t) for t in all_track_infos]
 
         master_name, master_id, playlists = self._build_regular_playlists(
-            ctx, old_tid_to_dbid, valid_dbids, eval_tracks, spl_update,
+            ctx, old_tid_to_db_id, valid_db_ids, eval_tracks, spl_update,
         )
         self._sanitize_playlists(playlists, master_id)
         self._rebuild_podcast_playlist(playlists, all_track_infos)
 
         smart_playlists = self._build_smart_playlists(
-            ctx, valid_dbids, eval_tracks, spl_update,
+            ctx, valid_db_ids, eval_tracks, spl_update,
         )
 
         self._reevaluate_live_update(
-            playlists, smart_playlists, valid_dbids, eval_tracks, spl_update,
+            playlists, smart_playlists, valid_db_ids, eval_tracks, spl_update,
         )
 
         return master_name, playlists, smart_playlists
@@ -1856,8 +2133,8 @@ class SyncExecutor:
     def _build_regular_playlists(
         self,
         ctx: _SyncContext,
-        old_tid_to_dbid: dict[int, int],
-        valid_dbids: set[int],
+        old_tid_to_db_id: dict[int, int],
+        valid_db_ids: set[int],
         eval_tracks: list[dict],
         spl_update,
     ) -> tuple[str, int | None, list[PlaylistInfo]]:
@@ -1877,9 +2154,9 @@ class SyncExecutor:
             item_meta = []
             for item in items:
                 tid = item.get("track_id", 0)
-                dbid = old_tid_to_dbid.get(tid, 0)
-                if dbid in valid_dbids:
-                    track_ids.append(dbid)
+                db_id = old_tid_to_db_id.get(tid, 0)
+                if db_id in valid_db_ids:
+                    track_ids.append(db_id)
                     item_meta.append(PlaylistItemMeta(
                         podcast_group_flag=item.get("podcast_group_flag", 0),
                         group_id=item.get("group_id", 0),
@@ -1904,10 +2181,10 @@ class SyncExecutor:
             if prefs_data and rules_data:
                 info.smart_prefs = prefs_from_parsed(prefs_data)
                 info.smart_rules = rules_from_parsed(rules_data)
-                matched_dbids = spl_update(
+                matched_db_ids = spl_update(
                     info.smart_prefs, info.smart_rules, eval_tracks,
                 )
-                info.track_ids = [d for d in matched_dbids if d in valid_dbids]
+                info.track_ids = [d for d in matched_db_ids if d in valid_db_ids]
                 info.item_metadata = None
                 logger.debug("SPL (ds2) '%s': %d tracks matched",
                              info.name, len(info.track_ids))
@@ -1941,25 +2218,25 @@ class SyncExecutor:
     def _rebuild_podcast_playlist(playlists: list[PlaylistInfo],
                                   all_track_infos: list[TrackInfo]) -> None:
         """Ensure the Podcasts playlist reflects all current podcast tracks."""
-        podcast_dbids = [t.dbid for t in all_track_infos if t.media_type & 0x04]
+        podcast_db_ids = [t.db_id for t in all_track_infos if t.media_type & 0x04]
         existing_podcast_pl = next((p for p in playlists if p.podcast_flag), None)
 
-        if podcast_dbids:
+        if podcast_db_ids:
             if existing_podcast_pl is not None:
-                existing_podcast_pl.track_ids = podcast_dbids
+                existing_podcast_pl.track_ids = podcast_db_ids
                 existing_podcast_pl.item_metadata = None
                 logger.info("Rebuilt 'Podcasts' playlist with %d tracks",
-                            len(podcast_dbids))
+                            len(podcast_db_ids))
             else:
                 from iTunesDB_Writer.mhyp_writer import generate_playlist_id
                 playlists.append(PlaylistInfo(
                     name="Podcasts",
-                    track_ids=podcast_dbids,
+                    track_ids=podcast_db_ids,
                     playlist_id=generate_playlist_id(),
                     podcast_flag=1,
                 ))
                 logger.info("Auto-created 'Podcasts' playlist with %d tracks",
-                            len(podcast_dbids))
+                            len(podcast_db_ids))
         elif existing_podcast_pl is not None:
             playlists.remove(existing_podcast_pl)
             logger.info("Removed empty 'Podcasts' playlist (no podcast tracks)")
@@ -1967,7 +2244,7 @@ class SyncExecutor:
     def _build_smart_playlists(
         self,
         ctx: _SyncContext,
-        valid_dbids: set[int],
+        valid_db_ids: set[int],
         eval_tracks: list[dict],
         spl_update,
     ) -> list[PlaylistInfo]:
@@ -1980,7 +2257,7 @@ class SyncExecutor:
             info = PlaylistInfo(
                 name=pl.get("Title", "Untitled"),
                 playlist_id=pl.get("playlist_id"),
-                master=bool(pl.get("master_flag", 0)),
+                master=bool(pl.get("master_flag", 0)),  # Respect the original master flag
                 sortorder=pl.get("sort_order", 0),
                 mhsd5_type=pl.get("mhsd5_type", 0),
                 raw_mhod100=self._decode_raw_blob(pl.get("playlist_prefs")),
@@ -1990,23 +2267,24 @@ class SyncExecutor:
             if prefs_data and rules_data:
                 info.smart_prefs = prefs_from_parsed(prefs_data)
                 info.smart_rules = rules_from_parsed(rules_data)
-                matched_dbids = spl_update(
+                matched_db_ids = spl_update(
                     info.smart_prefs, info.smart_rules, eval_tracks,
                 )
 
                 if info.mhsd5_type:
-                    logger.debug("SPL (ds5) '%s': %d tracks would match "
-                                 "(iPod evaluates at runtime)",
-                                 info.name, len(matched_dbids))
+                    info.track_ids = [d for d in matched_db_ids if d in valid_db_ids]
+                    info.item_metadata = None
+                    logger.debug("SPL (ds5) '%s': %d tracks matched and assigned",
+                                 info.name, len(info.track_ids))
                 elif info.smart_prefs.live_update:
-                    info.track_ids = [d for d in matched_dbids if d in valid_dbids]
+                    info.track_ids = [d for d in matched_db_ids if d in valid_db_ids]
                     info.item_metadata = None
                     logger.debug("SPL (ds5) '%s': %d tracks matched (live_update)",
                                  info.name, len(info.track_ids))
                 else:
                     logger.debug("SPL (ds5) '%s': %d tracks would match "
                                  "(live_update=False, keeping existing)",
-                                 info.name, len(matched_dbids))
+                                 info.name, len(matched_db_ids))
 
             smart_playlists.append(info)
 
@@ -2018,17 +2296,17 @@ class SyncExecutor:
     def _reevaluate_live_update(
         playlists: list[PlaylistInfo],
         smart_playlists: list[PlaylistInfo],
-        valid_dbids: set[int],
+        valid_db_ids: set[int],
         eval_tracks: list[dict],
         spl_update,
     ) -> None:
         """Re-evaluate all live-update SPLs against the final track list."""
         for info in list(playlists) + [s for s in smart_playlists if not s.mhsd5_type]:
             if info.smart_prefs and info.smart_rules and info.smart_prefs.live_update:
-                matched_dbids = spl_update(
+                matched_db_ids = spl_update(
                     info.smart_prefs, info.smart_rules, eval_tracks,
                 )
-                new_ids = [d for d in matched_dbids if d in valid_dbids]
+                new_ids = [d for d in matched_db_ids if d in valid_db_ids]
                 if new_ids != info.track_ids:
                     logger.info("SPL live-update '%s': %d → %d tracks after "
                                 "final re-evaluation",
@@ -2041,12 +2319,12 @@ class SyncExecutor:
         """Convert a TrackInfo to a dict the SPL evaluator can consume.
 
         The evaluator expects parsed-track-style dicts with keys matching
-        the accessor maps in spl_evaluator.py.  We use dbid as the
-        track_id so that spl_update() returns dbids directly.
+        the accessor maps in spl_evaluator.py.  We use db_id as the
+        track_id so that spl_update() returns db_ids directly.
         """
         d: dict = {
-            # Use dbid as track_id so evaluator returns dbids
-            "track_id": t.dbid,
+            # Use db_id as track_id so evaluator returns db_ids
+            "track_id": t.db_id,
             # String fields
             "Title": t.title or "",
             "Album": t.album or "",
@@ -2128,9 +2406,9 @@ class SyncExecutor:
             from device_info import get_current_device
             from ipod_models import capabilities_for_family_gen
             dev = get_current_device()
-            if dev and dev.model_family and dev.generation:
+            if dev and dev.model_family:
                 capabilities = capabilities_for_family_gen(
-                    dev.model_family, dev.generation,
+                    dev.model_family, dev.generation or "",
                 )
         except Exception as exc:
             logger.debug("Could not load device capabilities: %s", exc)
@@ -2149,11 +2427,35 @@ class SyncExecutor:
             logger.exception("Failed to write iTunesDB: %s", e)
             return False
 
-        # ── SQLite databases for Nano 6G/7G ───────────────────────────
-        if capabilities and capabilities.uses_sqlite_db:
-            logger.info("Device uses SQLite databases — writing iTunes Library.itlp/")
+        # ── SQLite databases (Nano 5G/6G/7G) ─────────────────────────
+        # Write SQLite databases if the device declares uses_sqlite_db OR
+        # if the iTunes Library.itlp directory already exists (e.g. Nano 5G
+        # where iTunes created the directory but the capability flag is off).
+        itlp_dir = os.path.join(str(self.ipod_path), "iPod_Control", "iTunes", "iTunes Library.itlp")
+        has_itlp = os.path.isdir(itlp_dir)
+        if (capabilities and capabilities.uses_sqlite_db) or has_itlp:
+            logger.info("Writing SQLite databases to iTunes Library.itlp/ "
+                        "(uses_sqlite_db=%s, itlp_exists=%s)",
+                        capabilities.uses_sqlite_db if capabilities else False,
+                        has_itlp)
             try:
                 from SQLiteDB_Writer import write_sqlite_databases
+                import struct as _struct
+
+                # Extract db_pid from the CDB we just wrote so SQLite databases
+                # use the same persistent ID — firmware cross-references both.
+                db_pid = 0
+                try:
+                    from device_info import resolve_itdb_path
+                    cdb_path = resolve_itdb_path(str(self.ipod_path))
+                    if cdb_path:
+                        with open(cdb_path, "rb") as _f:
+                            _hdr = _f.read(0x20)
+                        if len(_hdr) >= 0x20 and _hdr[:4] == b"mhbd":
+                            db_pid = _struct.unpack_from('<Q', _hdr, 0x18)[0]
+                            logger.debug("Extracted db_pid=%016X from CDB for SQLite", db_pid)
+                except Exception as exc:
+                    logger.warning("Could not extract db_pid from CDB: %s", exc)
 
                 # Get FireWire ID for cbk signing
                 firewire_id = None
@@ -2169,6 +2471,7 @@ class SyncExecutor:
                     playlists=playlists,
                     smart_playlists=smart_playlists,
                     master_playlist_name=master_playlist_name,
+                    db_pid=db_pid,
                     capabilities=capabilities,
                     firewire_id=firewire_id,
                 )

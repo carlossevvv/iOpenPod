@@ -118,8 +118,9 @@ class TrackListTitleBar(QFrame):
     def resetColor(self):
         """Reset to the default blue gradient."""
         self.setStyleSheet(_default_css())
-        r, g, b = Colors.PLAYLIST_REGULAR
-        self._set_handle_color(f"rgba({r},{g},{b},180)")
+        # Clear any per-album override so the app-level splitter style (with
+        # hover/pressed states) takes over again.
+        self.splitter.setStyleSheet("")
 
     def _set_handle_color(self, color: str):
         """Update the splitter handle to match the title bar color."""

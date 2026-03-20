@@ -55,7 +55,7 @@ def find_fpcalc() -> Optional[str]:
 
     Search order:
     1. User-configured path in settings
-    2. Bundled binary (auto-downloaded to ~/iOpenPod/bin/)
+    2. Bundled binary (auto-downloaded to <settings_dir>/bin/)
     3. System PATH
     4. Common installation directories
     """
@@ -126,6 +126,8 @@ def compute_fingerprint(filepath: str | Path, fpcalc_path: Optional[str] = None)
             [fpcalc, "-raw", str(filepath)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=300,
             **_SP_KWARGS,
         )

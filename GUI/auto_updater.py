@@ -343,7 +343,23 @@ def _write_unix_bootstrap(
     exe_name: str,
 ) -> Path:
     """Write a shell script that swaps the update after we exit."""
-    script = app_dir.parent / "_iopenpod_update.sh"
+    # Write to temp dir — app_dir.parent (e.g. /Applications/) may not be writable
+    script = Path(tempfile.gettempdir()) / "_iopenpod_update.sh"
+
+    # On macOS, use ditto (preserves permissions, resource forks, etc.)
+    # and remove quarantine so Gatekeeper doesn't block the updated app.
+    # On Linux, use cp -a to preserve all attributes.
+    is_macos = sys.platform == "darwin"
+    if is_macos:
+        copy_cmd = f'ditto "{staged_dir}" "{app_dir}"'
+        post_copy = (
+            f'xattr -dr com.apple.quarantine "{app_dir}" 2>/dev/null\n'
+            f'chmod -R +x "{app_dir}/Contents/MacOS" 2>/dev/null\n'
+        )
+    else:
+        copy_cmd = f'cp -a "{staged_dir}/." "{app_dir}/"'
+        post_copy = f'chmod +x "{app_dir}/{exe_name}"\n'
+
     script.write_text(
         f'#!/bin/sh\n'
         f'echo "Waiting for iOpenPod to exit..."\n'
@@ -351,8 +367,8 @@ def _write_unix_bootstrap(
         f'echo "Applying update..."\n'
         f'rm -rf "{app_dir}.bak"\n'
         f'mv "{app_dir}" "{app_dir}.bak"\n'
-        f'cp -R "{staged_dir}" "{app_dir}"\n'
-        f'chmod +x "{app_dir}/{exe_name}"\n'
+        f'{copy_cmd}\n'
+        f'{post_copy}'
         f'echo "Restarting iOpenPod..."\n'
         f'"{app_dir}/{exe_name}" &\n'
         f'rm -rf "{app_dir}.bak"\n'

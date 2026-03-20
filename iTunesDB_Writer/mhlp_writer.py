@@ -72,7 +72,7 @@ def write_mhlp(playlist_chunks: List[bytes]) -> bytes:
 def write_mhlp_with_playlists(
     track_ids: List[int],
     playlists: List[PlaylistInfo],
-    id_0x24,
+    db_id_2,
     tracks: Optional[List[TrackInfo]] = None,
     capabilities=None,
     master_playlist_name: str = "iPod",
@@ -92,7 +92,7 @@ def write_mhlp_with_playlists(
         track_ids: List of ALL track IDs in the database (for master playlist)
         playlists: List of user PlaylistInfo objects (master is NOT included)
         tracks: List of ALL TrackInfo objects (needed for library indices)
-        id_0x24: Database-wide ID from MHBD offset 0x24
+        db_id_2: Database-wide ID from MHBD offset 0x24
         capabilities: Optional DeviceCapabilities for video sort indices.
         master_playlist_name: Display name for the auto-generated master playlist.
 
@@ -103,7 +103,7 @@ def write_mhlp_with_playlists(
 
     # Master playlist MUST be first
     master = write_master_playlist(
-        track_ids, tracks=tracks, id_0x24=id_0x24,
+        track_ids, tracks=tracks, db_id_2=db_id_2,
         capabilities=capabilities, name=master_playlist_name,
         playlist_id=master_playlist_id,
     )
@@ -125,7 +125,7 @@ def write_mhlp_with_playlists(
 
     # Write all user playlists (regular and smart).
     for pl in playlists:
-        chunks.append(write_playlist(pl, id_0x24=id_0x24))
+        chunks.append(write_playlist(pl, db_id_2=db_id_2))
 
     return write_mhlp(chunks)
 
@@ -133,7 +133,7 @@ def write_mhlp_with_playlists(
 def write_mhlp_with_playlists_type3(
     track_ids: List[int],
     playlists: List["PlaylistInfo"],
-    id_0x24: int,
+    db_id_2: int,
     track_album_map: dict[int, str],
     tracks: Optional[List["TrackInfo"]] = None,
     capabilities=None,
@@ -159,7 +159,7 @@ def write_mhlp_with_playlists_type3(
         track_ids: ALL track IDs in the database (for the master playlist)
         playlists: User playlist list (same objects as type 2; master is
                    auto-generated)
-        id_0x24: Database-wide ID from MHBD offset 0x24
+        db_id_2: Database-wide ID from MHBD offset 0x24
         track_album_map: track_id → album name for podcast grouping
         tracks: TrackInfo list (needed for master playlist library indices)
         capabilities: DeviceCapabilities (for video sort indices etc.)
@@ -173,7 +173,7 @@ def write_mhlp_with_playlists_type3(
 
     # Master playlist — identical to type 2
     master = write_master_playlist(
-        track_ids, tracks=tracks, id_0x24=id_0x24,
+        track_ids, tracks=tracks, db_id_2=db_id_2,
         capabilities=capabilities, name=master_playlist_name,
         playlist_id=master_playlist_id,
     )
@@ -190,7 +190,7 @@ def write_mhlp_with_playlists_type3(
 
     for pl in playlists:
         chunks.append(write_playlist(
-            pl, id_0x24=id_0x24,
+            pl, db_id_2=db_id_2,
             podcast_grouping=True,
             track_album_map=track_album_map,
             next_mhip_id_start=next_mhip_id_start,
@@ -201,7 +201,7 @@ def write_mhlp_with_playlists_type3(
 
 def write_mhlp_smart(
     playlists: List[PlaylistInfo],
-    id_0x24: int = 0,
+    db_id_2: int = 0,
 ) -> bytes:
     """
     Write an MHLP chunk for dataset type 5 (smart playlist list).
@@ -223,7 +223,7 @@ def write_mhlp_smart(
 
     Args:
         playlists: List of PlaylistInfo objects (smart playlists only)
-        id_0x24: Database-wide ID from MHBD offset 0x24
+        db_id_2: Database-wide ID from MHBD offset 0x24
 
     Returns:
         Complete MHLP chunk, or empty MHLP if no smart playlists
@@ -233,6 +233,6 @@ def write_mhlp_smart(
 
     chunks = []
     for pl in playlists:
-        chunks.append(write_playlist(pl, id_0x24=id_0x24))
+        chunks.append(write_playlist(pl, db_id_2=db_id_2))
 
     return write_mhlp(chunks)

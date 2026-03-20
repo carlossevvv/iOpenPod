@@ -1,61 +1,118 @@
 """
-Transcode Cache - Caches transcoded audio files to avoid redundant transcoding.
+Transcode Cache — Caches transcoded audio files to avoid redundant transcoding.
 
 Benefits:
-- Multiple iPods: Transcode once, copy to all devices
-- Re-sync: If iPod is wiped, cached files are still available
-- Quality upgrades: Only retranscode if source file changed
+- Multiple iPods: Transcode once, copy to all devices.
+- Re-sync: If an iPod is wiped, cached files are still available.
+- Quality upgrades: Only retranscode if the source file actually changed.
 
-Cache location: ~/iOpenPod/cache/ (cross-platform)
+Cache location: platform-appropriate (configurable via settings)
+  Windows: ~/iOpenPod/cache/
+  macOS:   ~/Library/Caches/iOpenPod/
+  Linux:   $XDG_CACHE_HOME/iOpenPod/ (~/.cache/iOpenPod/)
 
 Cache structure:
-  index.json - Maps fingerprint → cached file info
-  files/     - Actual transcoded files (named by fingerprint hash)
+  index.json — Maps fingerprint:format:bitrate → CachedFile metadata
+  files/     — Actual transcoded files, named by fingerprint hash
+
+Change detection (layered, fastest first):
+  1. Source file size differs         → immediately invalid, no IO needed
+  2. Source file mtime changed        → compute SHA-256 to confirm
+  3. SHA-256 hash matches stored hash → still valid (e.g. copy with same content)
+  4. SHA-256 differs                  → invalidate and retranscode
+
+LRU eviction:
+  When a new file would push the cache past max_cache_size_gb, the least-recently-
+  used entries (by last_accessed timestamp) are removed until there is room.
 """
 
 import json
 import hashlib
 import logging
+import os
 import shutil
 import threading
-from pathlib import Path
-from typing import Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Default cache location
-DEFAULT_CACHE_DIR = Path.home() / "iOpenPod" / "cache"
+# Default cache location (XDG-aware on Linux)
 
+
+def _resolve_default_cache_dir() -> Path:
+    try:
+        from settings import _default_cache_dir
+        return Path(_default_cache_dir())
+    except Exception:
+        return Path.home() / "iOpenPod" / "cache"
+
+
+DEFAULT_CACHE_DIR = _resolve_default_cache_dir()
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def hash_source_file(path: str | Path) -> str:
+    """Return the SHA-256 hex digest of a file's full content.
+
+    Reads in 64 KB chunks to keep memory usage flat on large files.
+    Typical cost: ~100–300 ms for a 30–100 MB FLAC on spinning disk.
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65_536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ── Data classes ─────────────────────────────────────────────────────────────
 
 @dataclass
 class CachedFile:
-    """Info about a cached transcoded file."""
+    """Metadata for one cached transcoded file."""
 
-    fingerprint: str  # Acoustic fingerprint of source
-    source_format: str  # Original format (flac, wav, etc.)
-    target_format: str  # Transcoded format (alac, aac)
-    filename: str  # Filename in cache
-    size: int  # File size in bytes
-    created: str  # ISO timestamp
-    source_size: int  # Original source file size (to detect changes)
-    bitrate: Optional[int] = None  # For lossy formats (AAC bitrate)
+    fingerprint: str        # Acoustic fingerprint of source audio
+    source_format: str      # Original file extension (flac, wav, …)
+    target_format: str      # Transcoded format (alac, aac)
+    filename: str           # Filename inside cache/files/
+    size: int               # Transcoded file size in bytes
+    created: str            # ISO-8601 timestamp when entry was created
+    source_size: int        # Source file size at cache time (fast change check)
+    bitrate: Optional[int] = None    # Nominal bitrate for lossy formats (kbps)
+    source_hash: Optional[str] = None  # SHA-256 of source content (definitive check)
+    source_mtime: float = 0.0          # Source file mtime at cache time (triggers hash recheck)
+    last_accessed: str = ""            # ISO-8601 timestamp of last cache hit (LRU key)
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> "CachedFile":
-        return cls(**data)
+        """Construct from a dict, tolerating missing fields from older index versions."""
+        return cls(
+            fingerprint=data["fingerprint"],
+            source_format=data["source_format"],
+            target_format=data["target_format"],
+            filename=data["filename"],
+            size=data["size"],
+            created=data["created"],
+            source_size=data["source_size"],
+            bitrate=data.get("bitrate"),
+            source_hash=data.get("source_hash"),
+            source_mtime=float(data.get("source_mtime") or 0.0),
+            last_accessed=data.get("last_accessed", ""),
+        )
 
 
 @dataclass
 class CacheIndex:
-    """Index of all cached transcoded files."""
+    """In-memory index: cache_key → CachedFile."""
 
     version: int = 1
-    _files: dict[str, CachedFile] | None = None  # cache_key → CachedFile
+    _files: dict[str, CachedFile] | None = None
 
     def __post_init__(self):
         if self._files is None:
@@ -63,33 +120,23 @@ class CacheIndex:
 
     @property
     def files(self) -> dict[str, CachedFile]:
-        """Access files dict, ensuring it's never None."""
         if self._files is None:
             self._files = {}
         return self._files
 
     def _make_key(self, fingerprint: str, target_format: str, bitrate: Optional[int] = None) -> str:
-        """Create cache key from fingerprint + format + bitrate."""
         if bitrate:
             return f"{fingerprint}:{target_format}:{bitrate}"
         return f"{fingerprint}:{target_format}"
 
-    def get(
-        self, fingerprint: str, target_format: str, bitrate: Optional[int] = None
-    ) -> Optional[CachedFile]:
-        """Get cached file info if exists."""
-        key = self._make_key(fingerprint, target_format, bitrate)
-        return self.files.get(key)
+    def get(self, fingerprint: str, target_format: str, bitrate: Optional[int] = None) -> Optional[CachedFile]:
+        return self.files.get(self._make_key(fingerprint, target_format, bitrate))
 
     def add(self, cached_file: CachedFile) -> None:
-        """Add or update a cached file entry."""
-        key = self._make_key(
-            cached_file.fingerprint, cached_file.target_format, cached_file.bitrate
-        )
+        key = self._make_key(cached_file.fingerprint, cached_file.target_format, cached_file.bitrate)
         self.files[key] = cached_file
 
     def remove(self, fingerprint: str, target_format: str, bitrate: Optional[int] = None) -> bool:
-        """Remove a cached file entry. Returns True if removed."""
         key = self._make_key(fingerprint, target_format, bitrate)
         if key in self.files:
             del self.files[key]
@@ -104,9 +151,12 @@ class CacheIndex:
 
     @classmethod
     def from_dict(cls, data: dict) -> "CacheIndex":
-        files = {}
+        files: dict[str, CachedFile] = {}
         for key, file_data in data.get("files", {}).items():
-            files[key] = CachedFile.from_dict(file_data)
+            try:
+                files[key] = CachedFile.from_dict(file_data)
+            except Exception as exc:
+                logger.warning("Skipping malformed cache entry %r: %s", key, exc)
         return cls(version=data.get("version", 1), _files=files)
 
     @property
@@ -118,77 +168,142 @@ class CacheIndex:
         return sum(f.size for f in self.files.values())
 
 
+# ── Main class ────────────────────────────────────────────────────────────────
+
 class TranscodeCache:
     """
-    Manages a cache of transcoded audio files.
+    Manages a persistent cache of transcoded audio files.
 
-    Usage:
-        cache = TranscodeCache()
+    Usage::
+
+        cache = TranscodeCache.get_instance()
 
         # Check if already cached
-        cached = cache.get(fingerprint, "alac")
+        cached = cache.get(fingerprint, "alac", source_size, source_path=path)
         if cached:
-            shutil.copy(cached, dest_path)
+            shutil.copy(cached, dest)
         else:
-            # Transcode and add to cache
-            transcode(source, temp_path)
-            cache.add(fingerprint, temp_path, "flac", "alac", source_size)
-
-        # Clean up old/orphaned files
-        cache.cleanup()
+            reserve_path = cache.reserve(fingerprint, "alac")
+            transcode(source, reserve_path.parent, reserve_path.stem)
+            cache.commit(fingerprint, "flac", "alac", source_size, source_path=path)
     """
 
-    def __init__(self, cache_dir: Optional[Path] = None):
-        """
-        Initialize cache.
+    _instance: Optional["TranscodeCache"] = None
+    _instance_lock = threading.Lock()
 
-        Args:
-            cache_dir: Cache directory (default: ~/iOpenPod/cache)
+    @classmethod
+    def get_instance(cls, cache_dir: Optional[Path] = None) -> "TranscodeCache":
+        """Return the shared singleton, creating it on first call.
+
+        If *cache_dir* differs from the current instance's directory,
+        the singleton is replaced with a new one pointing at the new path.
         """
+        resolved = cache_dir or DEFAULT_CACHE_DIR
+        with cls._instance_lock:
+            if cls._instance is None or cls._instance.cache_dir != resolved:
+                cls._instance = cls(cache_dir)
+        return cls._instance
+
+    def __init__(self, cache_dir: Optional[Path] = None):
         self.cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self.files_dir = self.cache_dir / "files"
         self.index_path = self.cache_dir / "index.json"
         self._lock = threading.Lock()
-
-        # Ensure directories exist
         self.files_dir.mkdir(parents=True, exist_ok=True)
-
-        # Load index
         self._index = self._load_index()
 
+    # ── Persistence ───────────────────────────────────────────────────────
+
     def _load_index(self) -> CacheIndex:
-        """Load cache index from disk."""
         if not self.index_path.exists():
             return CacheIndex()
-
         try:
             with open(self.index_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            index = CacheIndex.from_dict(data)
-            logger.info(f"Loaded cache index: {index.count} files")
-            return index
-        except Exception as e:
-            logger.warning(f"Failed to load cache index: {e}")
+            idx = CacheIndex.from_dict(data)
+            logger.info("Loaded cache index: %d files, %.1f MB",
+                        idx.count, idx.total_size / 1_048_576)
+            return idx
+        except Exception as exc:
+            logger.warning("Failed to load cache index: %s", exc)
             return CacheIndex()
 
     def _save_index(self) -> None:
-        """Save cache index to disk."""
+        """Write index to disk atomically via a temp file."""
+        tmp = self.index_path.with_suffix(".json.tmp")
         try:
-            with open(self.index_path, "w", encoding="utf-8") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._index.to_dict(), f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save cache index: {e}")
+            os.replace(tmp, self.index_path)
+        except Exception as exc:
+            logger.error("Failed to save cache index: %s", exc)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # ── File naming ───────────────────────────────────────────────────────
 
     def _fingerprint_to_filename(
-        self, fingerprint: str, target_format: str,
+        self,
+        fingerprint: str,
+        target_format: str,
         bitrate: Optional[int] = None,
     ) -> str:
-        """Convert fingerprint to a safe filename."""
-        # Hash the fingerprint to get a fixed-length, filesystem-safe name
         fp_hash = hashlib.sha256(fingerprint.encode()).hexdigest()[:24]
         ext = ".m4a" if target_format in ("alac", "aac") else f".{target_format}"
         bitrate_tag = f"_{bitrate}" if bitrate else ""
         return f"{fp_hash}_{target_format}{bitrate_tag}{ext}"
+
+    # ── Size limit ────────────────────────────────────────────────────────
+
+    def _get_max_bytes(self) -> int:
+        """Return the configured max cache size in bytes. 0 = unlimited."""
+        try:
+            from settings import get_settings
+            gb = float(getattr(get_settings(), "max_cache_size_gb", 5.0))
+            return int(gb * 1_073_741_824) if gb > 0 else 0
+        except Exception:
+            return 0
+
+    def _evict_to_fit(self, incoming_bytes: int) -> None:
+        """Remove LRU entries (by last_accessed, then created) until there is
+        room for *incoming_bytes*.  Must be called while holding ``_lock``."""
+        max_bytes = self._get_max_bytes()
+        if max_bytes <= 0:
+            return  # unlimited
+
+        current = self._index.total_size
+        needed = current + incoming_bytes
+        if needed <= max_bytes:
+            return
+
+        # Sort by LRU: entries never accessed sort first (empty last_accessed),
+        # then by last_accessed ascending, with created as tiebreak.
+        def _sort_key(kv: tuple) -> tuple:
+            cf = kv[1]
+            ts = cf.last_accessed or cf.created or ""
+            return (ts,)
+
+        entries = sorted(self._index.files.items(), key=_sort_key)
+        evicted = 0
+        for key, cached in entries:
+            if current + incoming_bytes <= max_bytes:
+                break
+            path = self.files_dir / cached.filename
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not remove cache file %s: %s", cached.filename, exc)
+            current -= cached.size
+            del self._index.files[key]
+            evicted += 1
+            logger.debug("Evicted (LRU): %s (%.1f MB)", cached.filename, cached.size / 1_048_576)
+
+        if evicted:
+            logger.info("LRU eviction: removed %d cache entries to stay within limit", evicted)
+
+    # ── Public API ────────────────────────────────────────────────────────
 
     def get(
         self,
@@ -196,49 +311,92 @@ class TranscodeCache:
         target_format: str,
         source_size: Optional[int] = None,
         bitrate: Optional[int] = None,
+        source_path: Optional[Path] = None,
     ) -> Optional[Path]:
-        """
-        Get path to cached transcoded file if it exists and is valid.
+        """Return path to a valid cached file, or ``None`` on miss / stale entry.
 
-        Args:
-            fingerprint: Acoustic fingerprint of source
-            target_format: Target format (alac, aac)
-            source_size: Original source file size (for validation)
-            bitrate: For AAC, the bitrate used
-
-        Returns:
-            Path to cached file, or None if not cached/invalid
+        Validation layers (fastest → most expensive):
+          1. Index miss          → None immediately
+          2. File missing on disk→ prune index entry, return None
+          3. Size mismatch       → invalidate, return None
+          4. mtime changed       → recompute SHA-256 to confirm content change
+          5. Hash mismatch       → invalidate, return None
+          6. All checks pass     → update ``last_accessed``, return path
         """
         with self._lock:
             cached = self._index.get(fingerprint, target_format, bitrate)
             if cached is None:
                 return None
 
-            # Check if cached file exists
             cached_path = self.files_dir / cached.filename
+
+            # Layer 2: file existence
             if not cached_path.exists():
-                logger.debug(f"Cached file missing: {cached.filename}")
+                logger.debug("Cached file gone from disk: %s", cached.filename)
                 self._index.remove(fingerprint, target_format, bitrate)
                 self._save_index()
                 return None
 
-            # Validate source hasn't changed (if source_size provided)
+            # Layer 3: size
             if source_size is not None and cached.source_size != source_size:
-                logger.debug(
-                    f"Source size changed: {cached.source_size} → {source_size}, invalidating cache"
-                )
-                # Clean up the stale entry and file
-                self._index.remove(fingerprint, target_format, bitrate)
-                if cached_path.exists():
-                    try:
-                        cached_path.unlink()
-                    except Exception:
-                        pass
-                self._save_index()
+                logger.debug("Source size changed (%d → %d), invalidating", cached.source_size, source_size)
+                self._invalidate_entry(fingerprint, target_format, bitrate, cached_path)
                 return None
 
-            logger.debug(f"Cache hit: {fingerprint[:20]}... → {cached.filename}")
+            # Layers 4–5: mtime + hash (only when source_path is provided)
+            if source_path is not None:
+                try:
+                    current_mtime = source_path.stat().st_mtime
+                except OSError:
+                    current_mtime = 0.0
+
+                mtime_changed = cached.source_mtime and current_mtime and (
+                    abs(current_mtime - cached.source_mtime) > 1.0
+                )
+                if mtime_changed:
+                    # mtime changed — verify content via hash before invalidating
+                    if cached.source_hash:
+                        try:
+                            actual_hash = hash_source_file(source_path)
+                        except OSError:
+                            actual_hash = None
+                        if actual_hash and actual_hash != cached.source_hash:
+                            logger.debug("Source content changed (hash mismatch), invalidating %s",
+                                         fingerprint[:20])
+                            self._invalidate_entry(fingerprint, target_format, bitrate, cached_path)
+                            return None
+                        # Hash matches — content is the same despite mtime change
+                        # (e.g. file was copied; update stored mtime)
+                        if actual_hash:
+                            cached.source_mtime = current_mtime
+                    # No stored hash → trust mtime change, invalidate
+                    else:
+                        logger.debug("Source mtime changed, no stored hash → invalidating %s",
+                                     fingerprint[:20])
+                        self._invalidate_entry(fingerprint, target_format, bitrate, cached_path)
+                        return None
+
+            # Cache hit — update last_accessed
+            cached.last_accessed = datetime.now(timezone.utc).isoformat()
+            self._save_index()
+
+            logger.debug("Cache hit: %s… → %s", fingerprint[:20], cached.filename)
             return cached_path
+
+    def _invalidate_entry(
+        self,
+        fingerprint: str,
+        target_format: str,
+        bitrate: Optional[int],
+        cached_path: Path,
+    ) -> None:
+        """Remove index entry and cached file.  Caller must hold ``_lock``."""
+        self._index.remove(fingerprint, target_format, bitrate)
+        try:
+            cached_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._save_index()
 
     def add(
         self,
@@ -248,38 +406,31 @@ class TranscodeCache:
         target_format: str,
         source_size: int,
         bitrate: Optional[int] = None,
+        source_path: Optional[Path] = None,
     ) -> Optional[Path]:
-        """
-        Add a transcoded file to the cache.
+        """Copy *transcoded_path* into the cache and register it in the index.
 
-        Args:
-            fingerprint: Acoustic fingerprint of source
-            transcoded_path: Path to the transcoded file
-            source_format: Original format
-            target_format: Target format
-            source_size: Original source file size
-            bitrate: For AAC, the bitrate used
-
-        Returns:
-            Path to the cached file, or None if caching failed
+        Evicts LRU entries if needed to stay within the configured size limit.
+        Returns the cached path on success, ``None`` on failure.
         """
         if not transcoded_path.exists():
-            logger.error(f"Cannot cache non-existent file: {transcoded_path}")
+            logger.error("Cannot cache non-existent file: %s", transcoded_path)
             return None
 
-        # Generate cache filename (include bitrate to differentiate quality levels)
         filename = self._fingerprint_to_filename(fingerprint, target_format, bitrate)
         cached_path = self.files_dir / filename
 
-        try:
-            # Lock the entire copy+index-update to prevent two threads from
-            # racing on the same fingerprint+format (last copy wins on disk
-            # but index entry could reference a different file's size).
-            with self._lock:
-                # Copy to cache (preserving the transcoded file for the caller)
-                shutil.copy2(transcoded_path, cached_path)
+        source_hash, source_mtime = _probe_source_meta(source_path)
 
-                # Update index
+        try:
+            incoming = transcoded_path.stat().st_size
+        except OSError:
+            incoming = 0
+
+        try:
+            with self._lock:
+                self._evict_to_fit(incoming)
+                shutil.copy2(transcoded_path, cached_path)
                 cached_file = CachedFile(
                     fingerprint=fingerprint,
                     source_format=source_format,
@@ -289,15 +440,15 @@ class TranscodeCache:
                     created=datetime.now(timezone.utc).isoformat(),
                     source_size=source_size,
                     bitrate=bitrate,
+                    source_hash=source_hash,
+                    source_mtime=source_mtime,
                 )
                 self._index.add(cached_file)
                 self._save_index()
-
-            logger.info(f"Cached: {fingerprint[:20]}... → {filename}")
+            logger.info("Cached: %s… → %s", fingerprint[:20], filename)
             return cached_path
-
-        except Exception as e:
-            logger.error(f"Failed to cache file: {e}")
+        except Exception as exc:
+            logger.error("Failed to cache file: %s", exc)
             return None
 
     def reserve(
@@ -306,11 +457,11 @@ class TranscodeCache:
         target_format: str,
         bitrate: Optional[int] = None,
     ) -> Path:
-        """Return the cache file path for a fingerprint without creating an index entry.
+        """Return the destination path for a direct-write transcode.
 
-        The caller should write the transcoded file to this path, then call
-        :meth:`commit` to register it in the index.  This avoids a redundant
-        copy compared to :meth:`add`.
+        The caller transcodes directly to this path, then calls :meth:`commit`.
+        No index entry is created yet; eviction happens in :meth:`commit`
+        once the actual file size is known.
         """
         filename = self._fingerprint_to_filename(fingerprint, target_format, bitrate)
         path = self.files_dir / filename
@@ -324,36 +475,48 @@ class TranscodeCache:
         target_format: str,
         source_size: int,
         bitrate: Optional[int] = None,
+        source_path: Optional[Path] = None,
     ) -> Optional[Path]:
         """Register a previously-reserved cache file in the index.
 
         The file at the path returned by :meth:`reserve` must already exist.
+        Evicts LRU entries if needed before registering.
         Returns the cached path on success, ``None`` on failure.
         """
         filename = self._fingerprint_to_filename(fingerprint, target_format, bitrate)
         cached_path = self.files_dir / filename
         if not cached_path.exists():
-            logger.error(f"Cannot commit non-existent cache file: {cached_path}")
+            logger.error("Cannot commit non-existent cache file: %s", cached_path)
             return None
+
+        source_hash, source_mtime = _probe_source_meta(source_path)
+
+        try:
+            file_size = cached_path.stat().st_size
+        except OSError:
+            file_size = 0
 
         try:
             with self._lock:
+                self._evict_to_fit(file_size)
                 cached_file = CachedFile(
                     fingerprint=fingerprint,
                     source_format=source_format,
                     target_format=target_format,
                     filename=filename,
-                    size=cached_path.stat().st_size,
+                    size=file_size,
                     created=datetime.now(timezone.utc).isoformat(),
                     source_size=source_size,
                     bitrate=bitrate,
+                    source_hash=source_hash,
+                    source_mtime=source_mtime,
                 )
                 self._index.add(cached_file)
                 self._save_index()
-            logger.info(f"Cached: {fingerprint[:20]}... \u2192 {filename}")
+            logger.info("Committed: %s… → %s", fingerprint[:20], filename)
             return cached_path
-        except Exception as e:
-            logger.error(f"Failed to commit cache entry: {e}")
+        except Exception as exc:
+            logger.error("Failed to commit cache entry: %s", exc)
             return None
 
     def copy_from_cache(
@@ -363,48 +526,27 @@ class TranscodeCache:
         dest_path: Path,
         source_size: Optional[int] = None,
         bitrate: Optional[int] = None,
+        source_path: Optional[Path] = None,
     ) -> bool:
-        """
-        Copy a cached file to destination if it exists.
-
-        Args:
-            fingerprint: Acoustic fingerprint
-            target_format: Target format
-            dest_path: Destination path
-            source_size: For validation
-            bitrate: For AAC
-
-        Returns:
-            True if copied from cache, False if not cached
-        """
-        cached_path = self.get(fingerprint, target_format, source_size, bitrate)
-        if cached_path is None:
+        """Copy a cached file to *dest_path*.  Returns ``True`` on success."""
+        cached = self.get(fingerprint, target_format, source_size, bitrate, source_path)
+        if cached is None:
             return False
-
         try:
             dest_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(cached_path, dest_path)
-            logger.debug(f"Copied from cache: {cached_path.name} → {dest_path}")
+            shutil.copy2(cached, dest_path)
+            logger.debug("Copied from cache: %s → %s", cached.name, dest_path)
             return True
-        except Exception as e:
-            logger.error(f"Failed to copy from cache: {e}")
+        except Exception as exc:
+            logger.error("Failed to copy from cache: %s", exc)
             return False
 
-    def invalidate(
-        self, fingerprint: str, target_format: Optional[str] = None
-    ) -> int:
-        """
-        Invalidate cached files for a fingerprint.
-
-        Args:
-            fingerprint: Acoustic fingerprint
-            target_format: If provided, only invalidate this format
-
-        Returns:
-            Number of entries invalidated
+    def invalidate(self, fingerprint: str, target_format: Optional[str] = None) -> int:
+        """Remove all cached entries for *fingerprint* (or a specific format).
+        Returns the number of entries removed.
         """
         count = 0
-        keys_to_remove = []
+        keys_to_remove: list[str] = []
 
         with self._lock:
             for key, cached in self._index.files.items():
@@ -414,109 +556,122 @@ class TranscodeCache:
 
             for key in keys_to_remove:
                 cached = self._index.files[key]
-                cached_path = self.files_dir / cached.filename
-                if cached_path.exists():
-                    try:
-                        cached_path.unlink()
-                    except Exception as e:
-                        logger.warning(f"Failed to delete cached file: {e}")
+                try:
+                    (self.files_dir / cached.filename).unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("Could not delete cached file %s: %s", cached.filename, exc)
                 del self._index.files[key]
                 count += 1
 
-            if count > 0:
+            if count:
                 self._save_index()
-                logger.info(f"Invalidated {count} cached entries for {fingerprint[:20]}...")
+                logger.info("Invalidated %d cache entries for %s…", count, fingerprint[:20])
 
         return count
 
-    def cleanup(self, max_age_days: Optional[int] = None) -> tuple[int, int]:
+    def trim_to_limit(self) -> int:
+        """Evict LRU entries until the cache is within the configured size limit.
+
+        Called after the user lowers the limit in settings.
+        Returns the number of entries removed.
         """
-        Clean up orphaned files and optionally old entries.
+        with self._lock:
+            before = self._index.count
+            self._evict_to_fit(0)
+            removed = before - self._index.count
+            if removed:
+                self._save_index()
+        return removed
 
-        Args:
-            max_age_days: If provided, remove entries older than this
+    def cleanup(self, max_age_days: Optional[int] = None) -> tuple[int, int]:
+        """Remove orphaned files and optionally age-out old entries.
 
-        Returns:
-            (orphaned_files_removed, old_entries_removed)
+        Returns ``(orphaned_files_removed, old_entries_removed)``.
         """
         orphaned = 0
         old = 0
 
-        # Find orphaned files (in filesystem but not in index)
-        indexed_files = {c.filename for c in self._index.files.values()}
-        for file_path in self.files_dir.iterdir():
-            if file_path.name not in indexed_files:
-                try:
-                    file_path.unlink()
-                    orphaned += 1
-                    logger.debug(f"Removed orphaned file: {file_path.name}")
-                except Exception as e:
-                    logger.warning(f"Failed to remove orphan: {e}")
-
-        # Remove old entries if max_age specified
-        if max_age_days is not None:
-            from datetime import timedelta
-
-            cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
-            keys_to_remove = []
-
-            for key, cached in self._index.files.items():
-                try:
-                    created = datetime.fromisoformat(cached.created)
-                    if created < cutoff:
-                        keys_to_remove.append(key)
-                except Exception:
-                    pass
-
-            for key in keys_to_remove:
-                cached = self._index.files[key]
-                cached_path = self.files_dir / cached.filename
-                if cached_path.exists():
+        with self._lock:
+            indexed_files = {c.filename for c in self._index.files.values()}
+            for file_path in self.files_dir.iterdir():
+                if file_path.name not in indexed_files:
                     try:
-                        cached_path.unlink()
+                        file_path.unlink()
+                        orphaned += 1
+                    except OSError as exc:
+                        logger.warning("Could not remove orphan %s: %s", file_path.name, exc)
+
+            if max_age_days is not None:
+                from datetime import timedelta
+                cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+                keys_to_remove: list[str] = []
+                for key, cached in self._index.files.items():
+                    try:
+                        if datetime.fromisoformat(cached.created) < cutoff:
+                            keys_to_remove.append(key)
                     except Exception:
                         pass
-                del self._index.files[key]
-                old += 1
+                for key in keys_to_remove:
+                    cached = self._index.files[key]
+                    try:
+                        (self.files_dir / cached.filename).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    del self._index.files[key]
+                    old += 1
 
-            if old > 0:
+            if old:
                 self._save_index()
 
         if orphaned or old:
-            logger.info(f"Cleanup: {orphaned} orphaned files, {old} old entries removed")
+            logger.info("Cleanup: %d orphaned, %d aged-out entries removed", orphaned, old)
 
         return orphaned, old
 
     def stats(self) -> dict:
-        """Get cache statistics."""
+        """Return cache statistics as a dict."""
+        with self._lock:
+            total_bytes = self._index.total_size
+            count = self._index.count
+        max_bytes = self._get_max_bytes()
         return {
-            "total_files": self._index.count,
-            "total_size_bytes": self._index.total_size,
-            "total_size_mb": round(self._index.total_size / (1024 * 1024), 2),
+            "total_files": count,
+            "total_size_bytes": total_bytes,
+            "total_size_mb": round(total_bytes / 1_048_576, 2),
+            "total_size_gb": round(total_bytes / 1_073_741_824, 2),
+            "max_size_bytes": max_bytes,
+            "max_size_gb": round(max_bytes / 1_073_741_824, 2) if max_bytes > 0 else 0,
             "cache_dir": str(self.cache_dir),
         }
 
     def clear(self) -> int:
-        """
-        Clear the entire cache.
-
-        Returns:
-            Number of files removed
-        """
-        count = self._index.count
-
-        # Remove all files
-        for cached in self._index.files.values():
-            cached_path = self.files_dir / cached.filename
-            if cached_path.exists():
+        """Delete all cached files and reset the index.  Returns file count removed."""
+        with self._lock:
+            count = self._index.count
+            for cached in self._index.files.values():
                 try:
-                    cached_path.unlink()
-                except Exception as e:
-                    logger.warning(f"Failed to delete: {e}")
-
-        # Clear index
-        self._index = CacheIndex()
-        self._save_index()
-
-        logger.info(f"Cache cleared: {count} files removed")
+                    (self.files_dir / cached.filename).unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("Could not delete %s: %s", cached.filename, exc)
+            self._index = CacheIndex()
+            self._save_index()
+        logger.info("Cache cleared: %d files removed", count)
         return count
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _probe_source_meta(source_path: Optional[Path]) -> tuple[Optional[str], float]:
+    """Return ``(sha256_hex_or_None, mtime_or_0)`` for a source file.
+
+    Computes the full SHA-256 hash.  Returns ``(None, 0.0)`` if
+    *source_path* is None or the file cannot be read.
+    """
+    if source_path is None:
+        return None, 0.0
+    try:
+        mtime = source_path.stat().st_mtime
+        sha = hash_source_file(source_path)
+        return sha, mtime
+    except OSError:
+        return None, 0.0

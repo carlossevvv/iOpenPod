@@ -2,7 +2,7 @@
 
 Layout:
     ┌──────────────────────────────────────────────────────────────┐
-    │  Toolbar: [+ Add Podcast] [↻ Refresh All]         status    │
+    │  Toolbar: [Add Podcast] [Refresh All]             status    │
     ├─────────────────┬────────────────────────────────────────────┤
     │  Feed list      │  Feed header (artwork · title · meta)     │
     │  (left panel)   ├────────────────────────────────────────────┤
@@ -28,6 +28,7 @@ from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QPixmap, QImage, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -37,6 +38,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QStackedWidget,
     QTableWidget,
@@ -52,13 +54,14 @@ from ..styles import (
     FONT_FAMILY,
     accent_btn_css,
     btn_css,
+    combo_css,
+    input_css,
     make_label,
     make_separator,
-    scrollbar_css,
     table_css,
     LABEL_SECONDARY,
 )
-from ..glyphs import glyph_pixmap
+from ..glyphs import glyph_icon, glyph_pixmap
 from .formatters import format_size
 
 log = logging.getLogger(__name__)
@@ -113,6 +116,8 @@ class PodcastBrowser(QFrame):
         self._ipod_path: str = ""
         self._store = None          # SubscriptionStore (lazy)
         self._selected_feed = None  # Current PodcastFeed
+        self._deferred_reconcile_tracks: list[dict] | None = None
+        self._episode_by_guid: dict[str, object] = {}
 
         self._build_ui()
 
@@ -126,16 +131,79 @@ class PodcastBrowser(QFrame):
         from PodcastManager.subscription_store import SubscriptionStore
         self._store = SubscriptionStore(ipod_path)
         self._store.load()
+
+        # Apply any deferred reconciliation captured before the Podcasts
+        # view/store was initialized (e.g. app.py data-ready timing).
+        if self._deferred_reconcile_tracks is not None:
+            deferred = self._deferred_reconcile_tracks
+            self._deferred_reconcile_tracks = None
+            self.reconcile_ipod_statuses(deferred)
+        else:
+            self.reconcile_ipod_statuses()
+
         self._refresh_feed_list()
+
+        # Eagerly refresh all feeds from RSS so the full episode catalog
+        # is available (the store only persists on-iPod/downloaded episodes).
+        if self._store.get_feeds():
+            self._refresh_all_feeds_bg()
 
     def clear(self) -> None:
         """Reset all state (called on device change)."""
+        global _artwork_cache
+        _artwork_cache.clear()
+
         self._store = None
         self._selected_feed = None
+        self._deferred_reconcile_tracks = None
+        self._episode_by_guid.clear()
+        if hasattr(self, '_session_refreshed'):
+            self._session_refreshed.clear()
         self._feed_list.clear()
         self._episode_table.setRowCount(0)
         self._status_label.setText("")
         self._stack.setCurrentIndex(0)
+
+    def reconcile_ipod_statuses(self, ipod_tracks: Optional[list[dict]] = None) -> None:
+        """Reconcile stored episode state with the current iPod track list.
+
+        This keeps "Downloaded" / "On iPod" statuses accurate even when
+        feeds are loaded after iTunesDB parsing or tracks were removed.
+        """
+        if not self._store:
+            # Store tracks for later reconciliation when set_device() creates
+            # the SubscriptionStore after the Podcasts tab is opened.
+            if ipod_tracks is not None:
+                self._deferred_reconcile_tracks = list(ipod_tracks)
+            return
+
+        if ipod_tracks is None:
+            try:
+                from ..app import iTunesDBCache
+                cache = iTunesDBCache.get_instance()
+                if not cache.is_ready():
+                    return
+                ipod_tracks = cache.get_tracks() or []
+            except Exception:
+                return
+
+        from PodcastManager.podcast_sync import PodcastTrackMatcher
+
+        feeds = self._store.get_feeds()
+        matcher = PodcastTrackMatcher(ipod_tracks)
+        changed_feeds: list = []
+
+        for feed in feeds:
+            if matcher.match_feed(feed):
+                changed_feeds.append(feed)
+
+        if changed_feeds:
+            self._store.update_feeds(changed_feeds)
+
+        if self._selected_feed:
+            refreshed = self._store.get_feed(self._selected_feed.feed_url)
+            if refreshed:
+                self._selected_feed = refreshed
 
     # ── UI construction ──────────────────────────────────────────────────
 
@@ -172,19 +240,42 @@ class PodcastBrowser(QFrame):
         layout.setContentsMargins((12), (6), (12), (6))
         layout.setSpacing((8))
 
-        self._add_btn = QPushButton("+ Add Podcast")
+        self._add_btn = QPushButton("Add Podcast")
         self._add_btn.setFont(QFont(FONT_FAMILY, (Metrics.FONT_SM)))
         self._add_btn.setStyleSheet(accent_btn_css())
         self._add_btn.setFixedHeight((30))
+        _add_ic = glyph_icon("plus", (14), Colors.TEXT_ON_ACCENT)
+        if _add_ic:
+            self._add_btn.setIcon(_add_ic)
+            self._add_btn.setIconSize(QSize((14), (14)))
         self._add_btn.clicked.connect(self._on_search)
         layout.addWidget(self._add_btn)
 
-        self._refresh_btn = QPushButton("↻  Refresh All")
+        self._refresh_btn = QPushButton("Refresh All")
         self._refresh_btn.setFont(QFont(FONT_FAMILY, (Metrics.FONT_SM)))
         self._refresh_btn.setStyleSheet(btn_css())
         self._refresh_btn.setFixedHeight((30))
+        _refresh_ic = glyph_icon("refresh", (14), Colors.TEXT_PRIMARY)
+        if _refresh_ic:
+            self._refresh_btn.setIcon(_refresh_ic)
+            self._refresh_btn.setIconSize(QSize((14), (14)))
         self._refresh_btn.clicked.connect(self._on_refresh_all)
         layout.addWidget(self._refresh_btn)
+
+        self._sync_btn = QPushButton("Sync Podcasts")
+        self._sync_btn.setFont(QFont(FONT_FAMILY, (Metrics.FONT_SM)))
+        self._sync_btn.setStyleSheet(btn_css())
+        self._sync_btn.setFixedHeight((30))
+        _sync_ic = glyph_icon("refresh", (14), Colors.TEXT_PRIMARY)
+        if _sync_ic:
+            self._sync_btn.setIcon(_sync_ic)
+            self._sync_btn.setIconSize(QSize((14), (14)))
+        self._sync_btn.setToolTip(
+            "Apply per-feed settings: remove listened/old episodes, "
+            "fill empty slots with new episodes"
+        )
+        self._sync_btn.clicked.connect(self._on_sync_podcasts)
+        layout.addWidget(self._sync_btn)
 
         layout.addStretch()
 
@@ -241,11 +332,15 @@ class PodcastBrowser(QFrame):
 
         layout.addSpacing((16))
 
-        cta_btn = QPushButton("+ Add Your First Podcast")
+        cta_btn = QPushButton("Add Your First Podcast")
         cta_btn.setFont(QFont(FONT_FAMILY, (Metrics.FONT_MD), QFont.Weight.DemiBold))
         cta_btn.setStyleSheet(accent_btn_css())
         cta_btn.setFixedHeight((38))
         cta_btn.setFixedWidth((240))
+        _cta_ic = glyph_icon("plus", (16), Colors.TEXT_ON_ACCENT)
+        if _cta_ic:
+            cta_btn.setIcon(_cta_ic)
+            cta_btn.setIconSize(QSize((16), (16)))
         cta_btn.clicked.connect(self._on_search)
         layout.addWidget(cta_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
@@ -318,7 +413,6 @@ class PodcastBrowser(QFrame):
             QListWidget::item:hover:!selected {{
                 background: {Colors.SURFACE_ACTIVE};
             }}
-            {scrollbar_css()}
         """)
 
         layout.addWidget(self._feed_list, stretch=1)
@@ -334,46 +428,195 @@ class PodcastBrowser(QFrame):
 
         # ── Feed info header ─────────────────────────────────────────────
         self._feed_header = QFrame()
-        self._feed_header.setFixedHeight((64))
-        self._feed_header.setStyleSheet(f"background: {Colors.SURFACE}; border: none;")
+        self._feed_header.setFixedHeight((240))
+        self._feed_header.setStyleSheet(f"""
+            background: {Colors.SURFACE};
+            border: 1px solid {Colors.BORDER_SUBTLE};
+            border-radius: {Metrics.BORDER_RADIUS_LG}px;
+        """)
 
-        hdr_layout = QHBoxLayout(self._feed_header)
-        hdr_layout.setContentsMargins((14), (10), (14), (10))
-        hdr_layout.setSpacing((12))
+        hdr_layout = QVBoxLayout(self._feed_header)
+        hdr_layout.setContentsMargins((12), (12), (12), (12))
+        hdr_layout.setSpacing((10))
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing((12))
 
         self._feed_art = QLabel()
-        art_size = (44)
+        art_size = (128)
         self._feed_art.setFixedSize(art_size, art_size)
         self._feed_art.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._feed_art.setStyleSheet(f"""
             background: {Colors.SURFACE_RAISED};
             border-radius: {Metrics.BORDER_RADIUS_SM}px;
+            border: 1px solid {Colors.BORDER_SUBTLE};
             color: {Colors.TEXT_TERTIARY};
-            font-size: {(18)}px;
+            font-size: {(32)}px;
         """)
-        _art_px = glyph_pixmap("broadcast", (24), Colors.TEXT_TERTIARY)
-        if _art_px:
-            self._feed_art.setPixmap(_art_px)
-        else:
-            self._feed_art.setText("◎")
-        hdr_layout.addWidget(self._feed_art)
+        self._set_feed_art_placeholder()
+        top_row.addWidget(self._feed_art)
 
         hdr_text = QVBoxLayout()
-        hdr_text.setSpacing((2))
+        hdr_text.setSpacing((4))
         self._feed_title_label = make_label(
             "Select a podcast",
-            size=(Metrics.FONT_XL),
+            size=(Metrics.FONT_TITLE),
             weight=QFont.Weight.DemiBold,
         )
+        self._feed_title_label.setWordWrap(True)
         hdr_text.addWidget(self._feed_title_label)
+
+        self._feed_author_label = make_label(
+            "",
+            size=(Metrics.FONT_MD),
+            style=LABEL_SECONDARY(),
+        )
+        self._feed_author_label.setWordWrap(True)
+        hdr_text.addWidget(self._feed_author_label)
+
+        self._feed_description_label = make_label(
+            "",
+            size=(Metrics.FONT_SM),
+            style=LABEL_SECONDARY(),
+            wrap=True,
+        )
+        self._feed_description_label.setMaximumHeight((44))
+        hdr_text.addWidget(self._feed_description_label)
 
         self._feed_detail_label = make_label(
             "",
             size=(Metrics.FONT_SM),
             style=LABEL_SECONDARY(),
         )
+        self._feed_detail_label.setWordWrap(True)
         hdr_text.addWidget(self._feed_detail_label)
-        hdr_layout.addLayout(hdr_text, stretch=1)
+
+        top_row.addLayout(hdr_text, stretch=1)
+
+        rhs_col = QVBoxLayout()
+        rhs_col.setSpacing((5))
+        rhs_col.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+
+        self._feed_stat_episodes = make_label(
+            "",
+            size=(Metrics.FONT_SM),
+            style=f"color: {Colors.TEXT_PRIMARY};",
+        )
+        self._feed_stat_downloaded = make_label(
+            "",
+            size=(Metrics.FONT_SM),
+            style=f"color: {Colors.ACCENT};",
+        )
+        self._feed_stat_on_ipod = make_label(
+            "",
+            size=(Metrics.FONT_SM),
+            style=f"color: {Colors.SUCCESS};",
+        )
+        self._feed_stat_extra = make_label(
+            "",
+            size=(Metrics.FONT_SM),
+            style=LABEL_SECONDARY(),
+            wrap=True,
+        )
+        self._feed_stat_extra.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+        rhs_col.addWidget(self._feed_stat_episodes, alignment=Qt.AlignmentFlag.AlignRight)
+        rhs_col.addWidget(self._feed_stat_downloaded, alignment=Qt.AlignmentFlag.AlignRight)
+        rhs_col.addWidget(self._feed_stat_on_ipod, alignment=Qt.AlignmentFlag.AlignRight)
+        rhs_col.addWidget(self._feed_stat_extra, alignment=Qt.AlignmentFlag.AlignRight)
+        rhs_col.addStretch()
+        top_row.addLayout(rhs_col)
+
+        hdr_layout.addLayout(top_row)
+
+        # ── Per-feed settings controls ─────────────────────────────────
+        _lbl_css = (
+            f"color: {Colors.TEXT_SECONDARY}; background: transparent; "
+            f"border: none;"
+        )
+        _combo_style = combo_css()
+        _spin_style = input_css() + """
+            QSpinBox { padding: 2px 6px; border-radius: 4px; }
+        """
+
+        def _make_setting_combo(options: list[str], width: int = 110) -> QComboBox:
+            cb = QComboBox()
+            cb.addItems(options)
+            cb.setFixedWidth(width)
+            cb.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
+            cb.setStyleSheet(_combo_style)
+            return cb
+
+        def _make_setting_label(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
+            lbl.setStyleSheet(_lbl_css)
+            return lbl
+
+        settings_area = QVBoxLayout()
+        settings_area.setContentsMargins(0, 0, 0, 0)
+        settings_area.setSpacing(6)
+
+        # Row 1: Episode Slots, Fill Mode, Clear Method
+        row1 = QHBoxLayout()
+        row1.setContentsMargins(0, 0, 0, 0)
+        row1.setSpacing(6)
+        row1.addSpacing(art_size + 12)
+
+        row1.addWidget(_make_setting_label("Episodes:"))
+        self._feed_episode_slots = QSpinBox()
+        self._feed_episode_slots.setRange(1, 50)
+        self._feed_episode_slots.setValue(3)
+        self._feed_episode_slots.setFixedWidth(60)
+        self._feed_episode_slots.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
+        self._feed_episode_slots.setStyleSheet(_spin_style)
+        row1.addWidget(self._feed_episode_slots)
+
+        row1.addSpacing(8)
+        row1.addWidget(_make_setting_label("Fill with:"))
+        self._feed_fill_mode = _make_setting_combo(
+            ["Newest Episode", "Next Episode"],
+        )
+        row1.addWidget(self._feed_fill_mode)
+
+        row1.addSpacing(8)
+        row1.addWidget(_make_setting_label("Clear method:"))
+        self._feed_clear_method = _make_setting_combo(
+            ["Remove Immediately", "Mark for Replacement"], width=140,
+        )
+        row1.addWidget(self._feed_clear_method)
+        row1.addStretch()
+
+        # Row 2: Clear When Listened, Clear Older Than
+        row2 = QHBoxLayout()
+        row2.setContentsMargins(0, 0, 0, 0)
+        row2.setSpacing(6)
+        row2.addSpacing(art_size + 12)
+
+        row2.addWidget(_make_setting_label("Clear when listened:"))
+        self._feed_clear_listened = _make_setting_combo(["Yes", "No"], width=70)
+        row2.addWidget(self._feed_clear_listened)
+
+        row2.addSpacing(8)
+        row2.addWidget(_make_setting_label("Clear when older than:"))
+        self._feed_clear_older = _make_setting_combo([
+            "1 Day", "3 Days", "1 Week", "2 Weeks",
+            "1 Month", "2 Months", "3 Months", "Never",
+        ])
+        row2.addWidget(self._feed_clear_older)
+        row2.addStretch()
+
+        settings_area.addLayout(row1)
+        settings_area.addLayout(row2)
+        hdr_layout.addLayout(settings_area)
+
+        # Connect setting changes to save handler
+        self._feed_episode_slots.valueChanged.connect(self._on_feed_setting_changed)
+        self._feed_fill_mode.currentTextChanged.connect(self._on_feed_setting_changed)
+        self._feed_clear_listened.currentTextChanged.connect(self._on_feed_setting_changed)
+        self._feed_clear_older.currentTextChanged.connect(self._on_feed_setting_changed)
+        self._feed_clear_method.currentTextChanged.connect(self._on_feed_setting_changed)
 
         layout.addWidget(self._feed_header)
         layout.addWidget(make_separator())
@@ -445,6 +688,10 @@ class PodcastBrowser(QFrame):
         self._add_to_ipod_btn.setFont(QFont(FONT_FAMILY, (Metrics.FONT_SM)))
         self._add_to_ipod_btn.setStyleSheet(accent_btn_css())
         self._add_to_ipod_btn.setFixedHeight((30))
+        _sync_ic = glyph_icon("download", (14), Colors.TEXT_ON_ACCENT)
+        if _sync_ic:
+            self._add_to_ipod_btn.setIcon(_sync_ic)
+            self._add_to_ipod_btn.setIconSize(QSize((14), (14)))
         self._add_to_ipod_btn.clicked.connect(self._on_add_to_ipod)
         action_layout.addWidget(self._add_to_ipod_btn)
 
@@ -494,7 +741,15 @@ class PodcastBrowser(QFrame):
 
             # Feed artwork thumbnail in list
             if feed.artwork_url and feed.artwork_url in _artwork_cache:
-                item.setIcon(QIcon(_artwork_cache[feed.artwork_url]))
+                icon_pm = scale_pixmap_for_display(
+                    _artwork_cache[feed.artwork_url],
+                    36,
+                    36,
+                    widget=self._feed_list,
+                    aspect_mode=Qt.AspectRatioMode.KeepAspectRatio,
+                    transform_mode=Qt.TransformationMode.SmoothTransformation,
+                )
+                item.setIcon(QIcon(icon_pm))
             elif feed.artwork_url:
                 self._load_feed_list_artwork(feed.artwork_url, i)
 
@@ -525,6 +780,22 @@ class PodcastBrowser(QFrame):
         feed_url = item.data(Qt.ItemDataRole.UserRole)
         self._selected_feed = self._store.get_feed(feed_url)
         self._show_episodes(self._selected_feed)
+
+        # Auto-refresh from RSS if this feed only has persisted episodes
+        # (on-iPod / downloaded) and hasn't been refreshed this session.
+        if self._selected_feed and not self._is_feed_refreshed_this_session(feed_url):
+            self._refresh_single_feed(self._selected_feed)
+
+    def _is_feed_refreshed_this_session(self, feed_url: str) -> bool:
+        """Check if a feed has been RSS-refreshed during this app session."""
+        if not hasattr(self, '_session_refreshed'):
+            self._session_refreshed: set[str] = set()
+        return feed_url in self._session_refreshed
+
+    def _mark_feed_refreshed(self, feed_url: str) -> None:
+        if not hasattr(self, '_session_refreshed'):
+            self._session_refreshed: set[str] = set()
+        self._session_refreshed.add(feed_url)
 
     def _on_feed_context_menu(self, pos):
         item = self._feed_list.itemAt(pos)
@@ -571,6 +842,14 @@ class PodcastBrowser(QFrame):
 
     def _on_episode_context_menu(self, pos) -> None:
         """Right-click on episode rows → Add/Remove actions."""
+        # If right-clicked row is not already selected, target that row only.
+        row = self._episode_table.rowAt(pos.y())
+        if row >= 0:
+            title_item = self._episode_table.item(row, _COL_TITLE)
+            if title_item and not title_item.isSelected():
+                self._episode_table.clearSelection()
+                self._episode_table.selectRow(row)
+
         selected = self._get_selected_episodes()
         if not selected:
             return
@@ -581,7 +860,7 @@ class PodcastBrowser(QFrame):
 
         can_add = [ep for _, ep in selected if ep.status not in (STATUS_ON_IPOD, STATUS_DOWNLOADING)]
         can_remove_dl = [ep for _, ep in selected if ep.status in (STATUS_DOWNLOADED,) and ep.downloaded_path]
-        can_remove_ipod = [ep for _, ep in selected if ep.status == STATUS_ON_IPOD and ep.ipod_dbid]
+        can_remove_ipod = [ep for _, ep in selected if ep.status == STATUS_ON_IPOD and ep.ipod_db_id]
 
         if not can_add and not can_remove_dl and not can_remove_ipod:
             return
@@ -646,34 +925,61 @@ class PodcastBrowser(QFrame):
     def _show_episodes(self, feed) -> None:
         """Populate the episode table for the given feed."""
         self._episode_table.setRowCount(0)
+        self._episode_by_guid.clear()
 
         if not feed:
             self._feed_title_label.setText("Select a podcast")
+            self._feed_author_label.setText("")
+            self._feed_description_label.setText("")
             self._feed_detail_label.setText("")
-            _reset_px = glyph_pixmap("broadcast", (24), Colors.TEXT_TERTIARY)
-            if _reset_px:
-                self._feed_art.setPixmap(_reset_px)
-            else:
-                self._feed_art.setText("◎")
+            self._feed_stat_episodes.setText("")
+            self._feed_stat_downloaded.setText("")
+            self._feed_stat_on_ipod.setText("")
+            self._feed_stat_extra.setText("")
+            self._load_feed_settings(None)
+            self._set_feed_art_placeholder()
             return
 
-        self._feed_title_label.setText(feed.title or "Untitled")
+        self._feed_title_label.setText(feed.title or "Untitled Podcast")
+        self._feed_author_label.setText(feed.author or "Unknown Author")
+
+        desc_text = (feed.description or "").replace("\n", " ").strip()
+        if len(desc_text) > 170:
+            desc_text = f"{desc_text[:167].rstrip()}..."
+        self._feed_description_label.setText(desc_text)
+
         detail_parts = []
-        if feed.author:
-            detail_parts.append(feed.author)
-        detail_parts.append(f"{len(feed.episodes)} episodes")
-        if feed.downloaded_count:
-            detail_parts.append(f"{feed.downloaded_count} downloaded")
-        if feed.on_ipod_count:
-            detail_parts.append(f"{feed.on_ipod_count} on iPod")
+        if feed.language:
+            detail_parts.append(feed.language.upper())
+        refreshed = _fmt_date(feed.last_refreshed)
+        if refreshed:
+            detail_parts.append(f"Updated {refreshed}")
+        if feed.feed_url:
+            detail_parts.append("RSS feed linked")
         self._feed_detail_label.setText("  ·  ".join(detail_parts))
+
+        self._feed_stat_episodes.setText(f"Episodes: {len(feed.episodes)}")
+        self._feed_stat_downloaded.setText(f"Downloaded: {feed.downloaded_count}")
+        self._feed_stat_on_ipod.setText(f"On iPod: {feed.on_ipod_count}")
+
+        extra_parts = []
+        if feed.category:
+            extra_parts.append(feed.category)
+        if feed.language:
+            extra_parts.append(feed.language.upper())
+        self._feed_stat_extra.setText(" · ".join(extra_parts))
+
+        self._load_feed_settings(feed)
 
         # Load header artwork
         if feed.artwork_url:
             self._load_feed_artwork(feed.artwork_url)
+        else:
+            self._set_feed_art_placeholder()
 
         # Populate episodes (newest first)
         episodes = sorted(feed.episodes, key=lambda e: e.pub_date, reverse=True)
+        self._episode_by_guid = {ep.guid: ep for ep in episodes}
         self._episode_table.setRowCount(len(episodes))
 
         for row, ep in enumerate(episodes):
@@ -730,6 +1036,38 @@ class PodcastBrowser(QFrame):
         dialog.subscribed.connect(self._subscribe_to_feed)
         dialog.exec()
 
+    def _refresh_all_feeds_bg(self) -> None:
+        """Silently refresh all feeds from RSS in the background.
+
+        Called automatically on device load so the full episode catalog
+        is available.  Unlike ``_on_refresh_all`` this does not disable
+        buttons or show a status bar message.
+        """
+        if not self._store:
+            return
+        feeds = self._store.get_feeds()
+        if not feeds:
+            return
+
+        from ..app import Worker, ThreadPoolSingleton
+        from PodcastManager.feed_parser import fetch_feed
+
+        store = self._store
+
+        def _refresh():
+            refreshed_feeds = []
+            for feed in feeds:
+                try:
+                    refreshed_feeds.append(fetch_feed(feed.feed_url, existing=feed))
+                except Exception as exc:
+                    log.warning("Background refresh failed for %s: %s", feed.title, exc)
+            return store.update_feeds(refreshed_feeds)
+
+        worker = Worker(_refresh)
+        worker.signals.result.connect(self._on_refresh_done)
+        worker.signals.error.connect(self._on_refresh_error)
+        ThreadPoolSingleton.get_instance().start(worker)
+
     def _on_refresh_all(self) -> None:
         """Refresh all subscribed feeds in background."""
         if not self._store:
@@ -749,15 +1087,13 @@ class PodcastBrowser(QFrame):
         store = self._store
 
         def _refresh_all():
-            updated = 0
+            refreshed_feeds = []
             for feed in feeds:
                 try:
-                    refreshed = fetch_feed(feed.feed_url, existing=feed)
-                    store.update_feed(refreshed)
-                    updated += 1
+                    refreshed_feeds.append(fetch_feed(feed.feed_url, existing=feed))
                 except Exception as exc:
                     log.warning("Failed to refresh %s: %s", feed.title, exc)
-            return updated
+            return store.update_feeds(refreshed_feeds)
 
         worker = Worker(_refresh_all)
         worker.signals.result.connect(self._on_refresh_done)
@@ -766,12 +1102,112 @@ class PodcastBrowser(QFrame):
         ThreadPoolSingleton.get_instance().start(worker)
 
     def _on_refresh_done(self, count: int) -> None:
-        self._set_status(f"Refreshed {count} feed{'s' if count != 1 else ''}")
+        # Mark all feeds as refreshed this session
+        if self._store:
+            for f in self._store.get_feeds():
+                self._mark_feed_refreshed(f.feed_url)
+        if count:
+            self._set_status(f"Refreshed {count} feed{'s' if count != 1 else ''}")
         self._refresh_feed_list()
+
+        # Re-display the currently selected feed's episodes with full catalog
+        if self._selected_feed and self._store:
+            updated = self._store.get_feed(self._selected_feed.feed_url)
+            if updated:
+                self._selected_feed = updated
+                self._show_episodes(updated)
 
     def _on_refresh_error(self, error_tuple) -> None:
         _, value, _ = error_tuple
         self._set_status(f"Refresh failed: {value}")
+
+    # ── Managed podcast sync ─────────────────────────────────────────────
+
+    def _on_sync_podcasts(self) -> None:
+        """Refresh all feeds, then build a managed sync plan.
+
+        The plan applies each feed's slot settings: removing listened/old
+        episodes and filling empty slots with new ones.
+        """
+        if not self._store:
+            return
+
+        feeds = self._store.get_feeds()
+        if not feeds:
+            self._set_status("No subscriptions to sync")
+            return
+
+        self._sync_btn.setEnabled(False)
+        self._set_status("Refreshing feeds for sync…", timeout_ms=0)
+
+        from ..app import Worker, ThreadPoolSingleton
+        from PodcastManager.feed_parser import fetch_feed
+
+        store = self._store
+
+        def _refresh_and_plan():
+            # Phase 1: Refresh all feeds from RSS
+            refreshed = []
+            for feed in feeds:
+                try:
+                    refreshed.append(fetch_feed(feed.feed_url, existing=feed))
+                except Exception as exc:
+                    log.warning("Failed to refresh %s: %s", feed.title, exc)
+                    refreshed.append(feed)  # Keep existing data
+            store.update_feeds(refreshed)
+            return refreshed
+
+        worker = Worker(_refresh_and_plan)
+        worker.signals.result.connect(self._on_sync_feeds_refreshed)
+        worker.signals.error.connect(self._on_sync_error)
+        ThreadPoolSingleton.get_instance().start(worker)
+
+    def _on_sync_feeds_refreshed(self, refreshed_feeds: list) -> None:
+        """Feeds refreshed — build podcast sync plan and emit for review."""
+        if not self._store:
+            self._sync_btn.setEnabled(True)
+            return
+
+        # Mark all as refreshed this session
+        for f in refreshed_feeds:
+            self._mark_feed_refreshed(f.feed_url)
+        self._refresh_feed_list()
+
+        # Get iPod tracks for plan building
+        ipod_tracks: list[dict] = []
+        try:
+            from ..app import iTunesDBCache
+            cache = iTunesDBCache.get_instance()
+            ipod_tracks = cache.get_tracks() or []
+        except Exception:
+            pass
+
+        from PodcastManager.podcast_sync import build_podcast_managed_plan
+
+        # Re-read feeds from store (they were just updated)
+        feeds = self._store.get_feeds()
+        plan = build_podcast_managed_plan(feeds, ipod_tracks, self._store)
+
+        if not plan.has_changes:
+            self._set_status("All podcasts are up to date")
+            self._sync_btn.setEnabled(True)
+            return
+
+        # Emit the plan (pending episodes will download during sync)
+        summary_parts = []
+        if plan.to_remove:
+            summary_parts.append(f"{len(plan.to_remove)} to remove")
+        if plan.to_add:
+            summary_parts.append(f"{len(plan.to_add)} to add")
+        self._set_status(f"Podcast sync: {', '.join(summary_parts)}")
+        self._sync_btn.setEnabled(True)
+        self.podcast_sync_requested.emit(plan)
+
+    def _on_sync_error(self, error_tuple) -> None:
+        self._progress_bar.hide()
+        _, value, _ = error_tuple
+        self._set_status(f"Sync failed: {value}")
+        self._sync_btn.setEnabled(True)
 
     # ── Subscribe / unsubscribe ──────────────────────────────────────────
 
@@ -799,6 +1235,7 @@ class PodcastBrowser(QFrame):
         if not self._store:
             return
         self._store.add_feed(feed)
+        self._mark_feed_refreshed(feed.feed_url)
         self._set_status(f"Subscribed to {feed.title}")
         self._refresh_feed_list()
 
@@ -840,8 +1277,16 @@ class PodcastBrowser(QFrame):
         if not self._store:
             return
         self._store.update_feed(feed)
+        self._mark_feed_refreshed(feed.feed_url)
         self._set_status(f"Refreshed {feed.title}")
         self._refresh_feed_list()
+
+        # Re-display episodes for the selected feed — _refresh_feed_list
+        # restores the selection but setCurrentRow won't emit if the row
+        # index didn't change, so the episode table wouldn't update.
+        if self._selected_feed and self._selected_feed.feed_url == feed.feed_url:
+            self._selected_feed = feed
+            self._show_episodes(feed)
 
     # ── Episode selection ────────────────────────────────────────────────
 
@@ -850,31 +1295,29 @@ class PodcastBrowser(QFrame):
         if not self._selected_feed:
             return []
 
-        episodes = sorted(
-            self._selected_feed.episodes, key=lambda e: e.pub_date, reverse=True
-        )
-
         selected_rows = sorted({idx.row() for idx in self._episode_table.selectedIndexes()})
         result = []
         for row in selected_rows:
             title_item = self._episode_table.item(row, _COL_TITLE)
             if title_item:
                 guid = title_item.data(Qt.ItemDataRole.UserRole)
-                for ep in episodes:
-                    if ep.guid == guid:
-                        result.append((row, ep))
-                        break
+                ep = self._episode_by_guid.get(guid)
+                if ep is not None:
+                    result.append((row, ep))
         return result
 
     # ── Add to iPod (download + sync in one step) ──────────────────
 
     def _on_add_to_ipod(self) -> None:
-        """Download (if needed) and sync selected episodes to iPod.
+        """Sync selected episodes to iPod.
+
+        Builds a sync plan that includes both downloaded and pending
+        episodes. Pending episodes will be downloaded during sync execution.
 
         Single-action flow:
         1. Filters out episodes already on iPod
-        2. Downloads any not-yet-downloaded episodes with progress
-        3. Auto-emits the sync plan when ready
+        2. Builds a sync plan (includes pending episodes)
+        3. Emits plan for sync review
         """
         selected = self._get_selected_episodes()
         if not selected:
@@ -887,113 +1330,37 @@ class PodcastBrowser(QFrame):
             self._set_action_status("No iPod connected")
             return
 
-        from PodcastManager.models import (
-            STATUS_DOWNLOADED, STATUS_NOT_DOWNLOADED, STATUS_ON_IPOD,
-        )
+        from PodcastManager.models import STATUS_ON_IPOD
 
         # Filter out episodes already on iPod
         actionable = [
-            (row, ep) for row, ep in selected
+            ep for _, ep in selected
             if ep.status != STATUS_ON_IPOD
         ]
         if not actionable:
             self._set_action_status("Selected episodes are already on iPod")
             return
 
-        need_download = [
-            (row, ep) for row, ep in actionable
-            if ep.status == STATUS_NOT_DOWNLOADED
-        ]
-        already_ready = [
-            (row, ep) for row, ep in actionable
-            if ep.status == STATUS_DOWNLOADED and ep.downloaded_path
-        ]
-
         feed = self._selected_feed
         self._add_to_ipod_btn.setEnabled(False)
 
-        if need_download:
-            # Download first, then build sync plan
-            self._pending_ready = already_ready
-            self._pending_feed = feed
-            self._start_download_and_sync(need_download, feed)
-        else:
-            # All selected are already downloaded — go straight to sync
-            self._build_and_emit_plan(already_ready, feed)
+        # Build sync plan directly (pending episodes will download during sync)
+        self._build_and_emit_plan(actionable, feed)
 
-    def _start_download_and_sync(self, to_download, feed) -> None:
-        """Download episodes with per-episode progress, then emit sync plan."""
-        from ..app import Worker, ThreadPoolSingleton
-        from PodcastManager.downloader import download_episode, embed_feed_artwork
-        from PodcastManager.models import STATUS_DOWNLOADED, STATUS_DOWNLOADING, STATUS_NOT_DOWNLOADED
+    def _build_and_emit_plan(self, actionable_episodes, feed) -> None:
+        """Build a SyncPlan from actionable episodes and emit to main app.
 
-        assert self._store is not None
-        store = self._store
-        dest_dir = store.feed_dir(feed)
-        total = len(to_download)
+        Accepts both downloaded and pending episodes. Pending episodes will
+        be downloaded during sync execution.
 
-        self._progress_bar.setRange(0, total)
-        self._progress_bar.setValue(0)
-        self._progress_bar.show()
-        self._set_action_status(f"Downloading 0 / {total}…", timeout_ms=0)
-
-        def _download_all():
-            downloaded = 0
-            for _, ep in to_download:
-                ep.status = STATUS_DOWNLOADING
-                try:
-                    path = download_episode(ep, dest_dir)
-                    embed_feed_artwork(path, feed.artwork_url)
-                    ep.downloaded_path = str(path)
-                    ep.status = STATUS_DOWNLOADED
-                    downloaded += 1
-                except Exception as exc:
-                    log.warning("Download failed for %s: %s", ep.title, exc)
-                    ep.status = STATUS_NOT_DOWNLOADED
-            store.update_feed(feed)
-            return downloaded
-
-        worker = Worker(_download_all)
-        worker.signals.result.connect(
-            lambda count: self._on_download_then_sync_done(count, feed))
-        worker.signals.error.connect(self._on_add_error)
-        worker.signals.finished.connect(
-            lambda: self._add_to_ipod_btn.setEnabled(True))
-        ThreadPoolSingleton.get_instance().start(worker)
-
-    def _on_download_then_sync_done(self, count: int, feed) -> None:
-        """Downloads finished — refresh UI and emit the sync plan."""
-        from PodcastManager.models import STATUS_DOWNLOADED
-
-        self._progress_bar.hide()
-        self._show_episodes(self._selected_feed)
-
-        if count == 0:
-            self._set_action_status("All downloads failed")
-            return
-
-        # Merge newly-downloaded with previously-ready episodes
-        ready = list(getattr(self, '_pending_ready', []))
-        for ep in feed.episodes:
-            if ep.status == STATUS_DOWNLOADED and ep.downloaded_path:
-                if not any(r_ep.guid == ep.guid for _, r_ep in ready):
-                    ready.append((0, ep))
-
-        self._set_action_status(
-            f"Downloaded {count}, sending to sync…", timeout_ms=0)
-        self._build_and_emit_plan(ready, feed)
-
-    def _build_and_emit_plan(self, ready_episodes, feed) -> None:
-        """Build a SyncPlan from ready episodes and emit to main app."""
-        from PodcastManager.models import STATUS_DOWNLOADED
-
-        episodes_for_plan = [
-            (ep, feed) for _, ep in ready_episodes
-            if ep.status == STATUS_DOWNLOADED and ep.downloaded_path
-        ]
+        Args:
+            actionable_episodes: List of PodcastEpisodes (not yet on iPod)
+            feed: Parent PodcastFeed
+        """
+        episodes_for_plan = [(ep, feed) for ep in actionable_episodes]
 
         if not episodes_for_plan:
-            self._set_action_status("No episodes ready to sync")
+            self._set_action_status("No episodes to sync")
             self._add_to_ipod_btn.setEnabled(True)
             return
 
@@ -1007,7 +1374,7 @@ class PodcastBrowser(QFrame):
             pass
 
         from PodcastManager.podcast_sync import build_podcast_sync_plan
-        plan = build_podcast_sync_plan(episodes_for_plan, ipod_tracks)
+        plan = build_podcast_sync_plan(episodes_for_plan, ipod_tracks, self._store)
 
         if not plan.to_add:
             self._set_action_status("All selected episodes are already on iPod")
@@ -1067,12 +1434,12 @@ class PodcastBrowser(QFrame):
         except Exception:
             pass
 
-        tracks_by_dbid = {t.get("dbid", 0): t for t in ipod_tracks if t.get("dbid")}
+        tracks_by_db_id = {t.get("db_id", 0): t for t in ipod_tracks if t.get("db_id")}
 
         to_remove: list[SyncItem] = []
         bytes_to_remove = 0
         for ep in episodes:
-            ipod_track = tracks_by_dbid.get(ep.ipod_dbid)
+            ipod_track = tracks_by_db_id.get(ep.ipod_db_id)
             if not ipod_track:
                 continue
             to_remove.append(SyncItem(
@@ -1111,13 +1478,137 @@ class PodcastBrowser(QFrame):
 
     # ── Artwork loading ──────────────────────────────────────────────────
 
+    # ── Per-feed settings ───────────────────────────────────────────────
+
+    def _load_feed_settings(self, feed) -> None:
+        """Populate the per-feed setting controls from a PodcastFeed."""
+        # Block signals while loading to avoid triggering saves
+        for w in (self._feed_episode_slots, self._feed_fill_mode,
+                  self._feed_clear_listened, self._feed_clear_older,
+                  self._feed_clear_method):
+            w.blockSignals(True)
+
+        enabled = feed is not None
+        self._feed_episode_slots.setEnabled(enabled)
+        self._feed_fill_mode.setEnabled(enabled)
+        self._feed_clear_listened.setEnabled(enabled)
+        self._feed_clear_older.setEnabled(enabled)
+        self._feed_clear_method.setEnabled(enabled)
+
+        if feed is not None:
+            self._feed_episode_slots.setValue(feed.episode_slots)
+
+            _fill_display = {"newest": "Newest Episode", "next": "Next Episode"}
+            idx = self._feed_fill_mode.findText(
+                _fill_display.get(feed.fill_mode, "Newest Episode"),
+            )
+            if idx >= 0:
+                self._feed_fill_mode.setCurrentIndex(idx)
+
+            _cl_display = {True: "Yes", False: "No"}
+            idx = self._feed_clear_listened.findText(
+                _cl_display.get(feed.clear_when_listened, "Yes"),
+            )
+            if idx >= 0:
+                self._feed_clear_listened.setCurrentIndex(idx)
+
+            _older_display = {
+                "1_day": "1 Day", "3_days": "3 Days",
+                "1_week": "1 Week", "2_weeks": "2 Weeks",
+                "1_month": "1 Month", "2_months": "2 Months",
+                "3_months": "3 Months", "never": "Never",
+            }
+            idx = self._feed_clear_older.findText(
+                _older_display.get(feed.clear_older_than, "Never"),
+            )
+            if idx >= 0:
+                self._feed_clear_older.setCurrentIndex(idx)
+
+            _method_display = {
+                "remove": "Remove Immediately",
+                "replace": "Mark for Replacement",
+            }
+            idx = self._feed_clear_method.findText(
+                _method_display.get(feed.clear_method, "Remove Immediately"),
+            )
+            if idx >= 0:
+                self._feed_clear_method.setCurrentIndex(idx)
+        else:
+            self._feed_episode_slots.setValue(3)
+            self._feed_fill_mode.setCurrentIndex(0)
+            self._feed_clear_listened.setCurrentIndex(0)
+            self._feed_clear_older.setCurrentIndex(
+                self._feed_clear_older.count() - 1,  # "Never"
+            )
+            self._feed_clear_method.setCurrentIndex(0)
+
+        for w in (self._feed_episode_slots, self._feed_fill_mode,
+                  self._feed_clear_listened, self._feed_clear_older,
+                  self._feed_clear_method):
+            w.blockSignals(False)
+
+    def _on_feed_setting_changed(self, *_args) -> None:
+        """Write current setting controls back to the selected feed."""
+        if not self._store or not self._selected_feed:
+            return
+
+        feed = self._selected_feed
+
+        _fill_keys = {"Newest Episode": "newest", "Next Episode": "next"}
+        _cl_keys = {"Yes": True, "No": False}
+        _older_keys = {
+            "1 Day": "1_day", "3 Days": "3_days",
+            "1 Week": "1_week", "2 Weeks": "2_weeks",
+            "1 Month": "1_month", "2 Months": "2_months",
+            "3 Months": "3_months", "Never": "never",
+        }
+        _method_keys = {
+            "Remove Immediately": "remove",
+            "Mark for Replacement": "replace",
+        }
+
+        feed.episode_slots = self._feed_episode_slots.value()
+        feed.fill_mode = _fill_keys.get(
+            self._feed_fill_mode.currentText(), "newest",
+        )
+        feed.clear_when_listened = _cl_keys.get(
+            self._feed_clear_listened.currentText(), True,
+        )
+        feed.clear_older_than = _older_keys.get(
+            self._feed_clear_older.currentText(), "never",
+        )
+        feed.clear_method = _method_keys.get(
+            self._feed_clear_method.currentText(), "remove",
+        )
+
+        self._store.update_feed(feed)
+
+    def _set_feed_art_placeholder(self) -> None:
+        """Set a crisp HiDPI-safe placeholder icon in the feed artwork slot."""
+        placeholder = glyph_pixmap("broadcast", (52), Colors.TEXT_TERTIARY)
+        if placeholder:
+            pm = scale_pixmap_for_display(
+                placeholder,
+                52,
+                52,
+                widget=self._feed_art,
+                aspect_mode=Qt.AspectRatioMode.KeepAspectRatio,
+                transform_mode=Qt.TransformationMode.SmoothTransformation,
+            )
+            self._feed_art.setPixmap(pm)
+            self._feed_art.setText("")
+            return
+        self._feed_art.setText("◎")
+
     def _load_feed_artwork(self, url: str) -> None:
         """Load feed artwork for the header panel in background."""
         if url in _artwork_cache:
+            art_w = max(1, self._feed_art.width())
+            art_h = max(1, self._feed_art.height())
             pm = scale_pixmap_for_display(
                 _artwork_cache[url],
-                44,
-                44,
+                art_w,
+                art_h,
                 widget=self._feed_art,
                 aspect_mode=Qt.AspectRatioMode.KeepAspectRatio,
                 transform_mode=Qt.TransformationMode.SmoothTransformation,
@@ -1154,10 +1645,12 @@ class PodcastBrowser(QFrame):
 
         # Update header art if still showing the same feed
         if self._selected_feed and self._selected_feed.artwork_url == url:
+            art_w = max(1, self._feed_art.width())
+            art_h = max(1, self._feed_art.height())
             pm = scale_pixmap_for_display(
                 full_pm,
-                44,
-                44,
+                art_w,
+                art_h,
                 widget=self._feed_art,
                 aspect_mode=Qt.AspectRatioMode.KeepAspectRatio,
                 transform_mode=Qt.TransformationMode.SmoothTransformation,

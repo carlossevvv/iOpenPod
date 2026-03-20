@@ -55,6 +55,18 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# ── Linux: exclude Qt platform input-context plugins ──────────────────────
+# PyInstaller bundles platforminputcontexts plugins (fcitx, ibus, compose)
+# compiled against the build machine's Qt.  At runtime these often ABI-clash
+# with the host's input-method framework, causing a SIGSEGV on any keypress.
+# Excluding them lets Qt fall back to the system's own plugins or to no
+# input method (fine for an app that doesn't need CJK/IME composition).
+if sys.platform == 'linux':
+    a.binaries = [
+        b for b in a.binaries
+        if 'platforminputcontexts' not in b[0]
+    ]
 pyz = PYZ(a.pure)
 
 exe = EXE(

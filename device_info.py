@@ -143,10 +143,16 @@ class DeviceInfo:
 
     @property
     def capabilities(self):
-        """Return the DeviceCapabilities for this device, or defaults."""
+        """Return the DeviceCapabilities for this device, or defaults.
+
+        Uses family-level fallback when generation is unknown but all
+        generations of the family share identical capabilities.
+        """
         from ipod_models import capabilities_for_family_gen, DeviceCapabilities
-        if self.model_family and self.generation:
-            caps = capabilities_for_family_gen(self.model_family, self.generation)
+        if self.model_family:
+            caps = capabilities_for_family_gen(
+                self.model_family, self.generation or "",
+            )
             if caps:
                 return caps
         return DeviceCapabilities()
@@ -191,12 +197,14 @@ def itdb_write_filename(ipod_path: str) -> str:
     available.  Falls back to whichever file already exists on disk, and
     finally defaults to ``"iTunesDB"``.
     """
-    # 1. Ask the device store
+    # 1. Ask the device store (capabilities handles family-level fallback)
     try:
         dev = get_current_device()
-        if dev and dev.model_family and dev.generation:
+        if dev and dev.model_family:
             from ipod_models import capabilities_for_family_gen
-            caps = capabilities_for_family_gen(dev.model_family, dev.generation)
+            caps = capabilities_for_family_gen(
+                dev.model_family, dev.generation or "",
+            )
             if caps and caps.supports_compressed_db:
                 return "iTunesCDB"
     except Exception:
@@ -584,11 +592,12 @@ def enrich(info: DeviceInfo) -> None:
     # ── 3b. Serial-last-3 model lookup ────────────────────────────────
     #   Very reliable — the last 3 chars of the serial encode the exact
     #   model (incl. capacity and color).  Always run when the serial is
-    #   available and ANY of model_number, capacity, or color is still
-    #   missing — serial lookup is higher confidence than USB PID and
-    #   provides the exact variant including color/revision.
+    #   available and ANY identity field is still missing — serial lookup
+    #   is higher confidence than USB PID and provides the exact variant
+    #   including generation, capacity, and color.
     if info.serial and (
-        not info.model_number or not info.capacity or not info.color
+        not info.model_number or not info.generation
+        or not info.capacity or not info.color
     ):
         _enrich_from_serial_lookup(info)
 
@@ -608,6 +617,38 @@ def enrich(info: DeviceInfo) -> None:
         except ImportError:
             pass
 
+    # ── 3d. Generation inference from family + capacity ───────────────
+    #   When we know the family (e.g. from USB PID) but not the generation,
+    #   use capacity to narrow it down.  For example, only iPod Classic
+    #   2nd Gen came in 120GB.  Disk-size-based capacity estimation
+    #   (stage 8/9) hasn't run yet, so this only works if capacity was
+    #   already resolved from serial, model number, or SysInfo.
+    if info.model_family and not info.generation:
+        _cap = info.capacity
+        if not _cap and info.disk_size_gb > 0:
+            _cap = _estimate_capacity_from_disk_size(info.disk_size_gb)
+        if not _cap and info.path:
+            try:
+                import shutil
+                total, _used, free = shutil.disk_usage(info.path)
+                _disk_gb = round(total / 1e9, 1)
+                _cap = _estimate_capacity_from_disk_size(_disk_gb)
+            except Exception:
+                pass
+        if _cap:
+            try:
+                from ipod_models import infer_generation
+                _gen = infer_generation(info.model_family, _cap)
+                if _gen:
+                    info.generation = _gen
+                    info._field_sources.setdefault("generation", "inferred")
+                    logger.info(
+                        "enrich: inferred generation %s from %s + %s",
+                        _gen, info.model_family, _cap,
+                    )
+            except ImportError:
+                pass
+
     # ── 4. iTunesDB header (hashing scheme, version) ─────────────────
     if info.path and info.hashing_scheme == -1:
         _enrich_from_itunesdb_header(info)
@@ -618,6 +659,7 @@ def enrich(info: DeviceInfo) -> None:
 
     # ── 6. HashInfo (cryptographic material for HASH72 signing) ───────
     if not info.hash_info_iv and info.path:
+        # Try HashInfo file first
         hi_path = os.path.join(
             info.path, "iPod_Control", "Device", "HashInfo",
         )
@@ -633,9 +675,32 @@ def enrich(info: DeviceInfo) -> None:
         except Exception as exc:
             logger.debug("enrich: HashInfo read failed: %s", exc)
 
+        # Fallback: extract IV/rndpart from existing iTunesCDB hash72 signature
+        if not info.hash_info_iv:
+            try:
+                itdb_path = resolve_itdb_path(info.path)
+                if itdb_path:
+                    with open(itdb_path, "rb") as f:
+                        itdb_data = f.read()
+                    if (len(itdb_data) >= 0xA0
+                            and itdb_data[:4] == b"mhbd"
+                            and itdb_data[0x72:0x74] == b"\x01\x00"):
+                        from iTunesDB_Writer.hash72 import extract_hash_info_to_dict
+                        hd = extract_hash_info_to_dict(itdb_data)
+                        if hd:
+                            info.hash_info_iv = hd["iv"]
+                            info.hash_info_rndpart = hd["rndpart"]
+                            logger.debug(
+                                "enrich: extracted HashInfo from existing %s",
+                                os.path.basename(itdb_path),
+                            )
+            except Exception as exc:
+                logger.debug("enrich: HashInfo extraction from CDB failed: %s", exc)
+
     # ── 7. Artwork formats ────────────────────────────────────────────
-    # Try model-based lookup first
-    if not info.artwork_formats and info.model_family and info.generation:
+    # Try model-based lookup first (ithmb_formats_for_device handles
+    # family-level fallback when generation is unknown).
+    if not info.artwork_formats and info.model_family:
         try:
             from ipod_models import ithmb_formats_for_device
             table = ithmb_formats_for_device(info.model_family, info.generation)
@@ -1105,10 +1170,15 @@ def _enrich_from_usb_vpd(info: DeviceInfo) -> None:
         info.model_family = result["model_family"]
         info.generation = result["generation"]
         info._field_sources["model_number"] = "vpd"
-        if not info.capacity:
+        # VPD serial-last-3 is authoritative — always overwrite capacity
+        # and color even if they were pre-populated from a stale/wrong
+        # SysInfo model number (e.g. MB029 → 80GB when device is MB565 → 120GB).
+        if result["capacity"]:
             info.capacity = result["capacity"]
-        if not info.color:
+            info._field_sources["capacity"] = "vpd"
+        if result["color"]:
             info.color = result["color"]
+            info._field_sources["color"] = "vpd"
 
     # Extract board from VPD raw data (previously obtained via SysInfo re-read)
     vpd_raw = result.get("vpd_info") or {}
@@ -1180,13 +1250,22 @@ def _enrich_from_serial_lookup(info: DeviceInfo) -> None:
         info.generation = model_info[1]
         info._field_sources["generation"] = _src
 
-    if not info.capacity:
+    # Serial-last-3 is authoritative for capacity/color — use the same
+    # rank comparison as family/generation so it overwrites stale values
+    # from a wrong SysInfo model number.
+    _cur_cap_rank = SOURCE_RANK.get(
+        info._field_sources.get("capacity", "unknown"), _WORST_RANK,
+    )
+    if model_info[2] and _serial_rank <= _cur_cap_rank:
         info.capacity = model_info[2]
-        info._field_sources.setdefault("capacity", _src)
+        info._field_sources["capacity"] = _src
 
-    if not info.color:
+    _cur_color_rank = SOURCE_RANK.get(
+        info._field_sources.get("color", "unknown"), _WORST_RANK,
+    )
+    if model_info[3] and _serial_rank <= _cur_color_rank:
         info.color = model_info[3]
-        info._field_sources.setdefault("color", _src)
+        info._field_sources["color"] = _src
 
     if info.identification_method in ("unknown", "hardware"):
         info.identification_method = "serial"
@@ -1352,13 +1431,15 @@ def _resolve_checksum_type(info: DeviceInfo) -> None:
         return
 
     # Priority 1: family + generation lookup (authoritative, no gaps)
-    if info.model_family and info.generation:
-        ct = checksum_type_for_family_gen(info.model_family, info.generation)
+    if info.model_family:
+        ct = checksum_type_for_family_gen(
+            info.model_family, info.generation or "",
+        )
         if ct is not None:
             info.checksum_type = int(ct)
             logger.debug(
                 "enrich: checksum %s (family=%s, gen=%s)",
-                ct.name, info.model_family, info.generation,
+                ct.name, info.model_family, info.generation or "(all)",
             )
             return
 

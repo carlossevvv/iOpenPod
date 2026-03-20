@@ -52,6 +52,7 @@ def write_locations_cbk(
     locations_itdb_path: str,
     checksum_type: ChecksumType,
     firewire_id: bytes | None = None,
+    ipod_path: str | None = None,
 ) -> None:
     """Generate and write the Locations.itdb.cbk checksum file.
 
@@ -60,6 +61,7 @@ def write_locations_cbk(
         locations_itdb_path: Path to the Locations.itdb file to checksum.
         checksum_type: The device's checksum algorithm (HASHAB, HASH58, etc.).
         firewire_id: 8-byte FireWire GUID (required for HASHAB and HASH58).
+        ipod_path: Mount point of iPod (used for HASH72 HashInfo fallback).
 
     Raises:
         ValueError: If firewire_id is missing when needed.
@@ -98,11 +100,58 @@ def write_locations_cbk(
         logger.debug("CBK header: HASH58 signature (%d bytes)", len(header))
 
     elif checksum_type == ChecksumType.HASH72:
-        # HASH72 requires HashInfo from device — this is more complex.
-        # For now, we don't generate cbk for HASH72 devices.
-        # The Nano 5G is the only HASH72 device and it may or may not need cbk.
-        logger.warning("HASH72 cbk generation not implemented — writing unsigned")
-        header = final_sha1  # Just use the SHA1 as a placeholder
+        from iTunesDB_Writer.hash72 import (
+            read_hash_info, extract_hash_info_to_dict,
+            _hash_generate, HashInfo,
+        )
+
+        # Try centralized store first
+        hash_info = None
+        try:
+            from device_info import get_current_device
+            dev = get_current_device()
+            if dev and dev.hash_info_iv and dev.hash_info_rndpart:
+                hash_info = HashInfo(
+                    uuid=b'\x00' * 20,
+                    rndpart=dev.hash_info_rndpart,
+                    iv=dev.hash_info_iv,
+                )
+        except Exception:
+            pass
+
+        if hash_info is None and ipod_path:
+            try:
+                hash_info = read_hash_info(ipod_path)
+            except Exception:
+                pass
+
+        # Fallback: extract from existing iTunesCDB on device
+        if hash_info is None and ipod_path:
+            try:
+                import os
+                from device_info import resolve_itdb_path
+                itdb_path = resolve_itdb_path(ipod_path)
+                if itdb_path:
+                    with open(itdb_path, "rb") as f:
+                        itdb_data = f.read()
+                    hd = extract_hash_info_to_dict(itdb_data)
+                    if hd:
+                        hash_info = HashInfo(
+                            uuid=b'\x00' * 20,
+                            rndpart=hd['rndpart'],
+                            iv=hd['iv'],
+                        )
+                        logger.debug("CBK: extracted HashInfo from existing %s",
+                                     os.path.basename(itdb_path))
+            except Exception:
+                pass
+
+        if hash_info:
+            header = _hash_generate(final_sha1, hash_info.iv, hash_info.rndpart)
+            logger.debug("CBK header: HASH72 signature (%d bytes)", len(header))
+        else:
+            logger.warning("No HashInfo available for HASH72 cbk — writing final SHA1 only")
+            header = final_sha1
 
     else:
         # No checksum needed — older devices or NONE

@@ -47,6 +47,14 @@ class MainWindow(QMainWindow):
         self._sync_worker = None
         self._sync_execute_worker = None
         self._plan = None
+        self._last_pc_folder = settings.music_folder or ""
+
+        # Quick metadata write (track flags, rating, etc.)
+        self._quick_meta_worker: _QuickMetadataWorker | None = None
+        self._quick_meta_timer = QTimer(self)
+        self._quick_meta_timer.setSingleShot(True)
+        self._quick_meta_timer.setInterval(1500)  # 1.5 s debounce
+        self._quick_meta_timer.timeout.connect(self._start_quick_meta_write)
 
         # Central widget with stacked layout for main/sync views
         self.centralStack = QStackedWidget()
@@ -63,6 +71,9 @@ class MainWindow(QMainWindow):
 
         # Connect cache ready signal to refresh UI
         iTunesDBCache.get_instance().data_ready.connect(self.onDataReady)
+
+        # Schedule an immediate write whenever track flags are edited in the UI
+        iTunesDBCache.get_instance().tracks_changed.connect(self._schedule_quick_meta_write)
 
         # Restore last device path if it still looks like a real iPod
         if settings.last_device_path:
@@ -83,6 +94,30 @@ class MainWindow(QMainWindow):
                         logger.warning("Last device path '%s' not discovered during auto-restore scan", settings.last_device_path)
                 except Exception as e:
                     logger.warning("Auto-restore scan failed: %s", e)
+
+            # Default to a no-device placeholder page until an iPod is selected.
+            self._show_default_page()
+
+        # Auto-check for updates in the background (silent — no popup if up-to-date)
+        self._startup_update_checker = None
+        QTimer.singleShot(2000, self._auto_check_for_updates)
+
+    def _auto_check_for_updates(self):
+        """Silently check for updates at startup. Only shows UI if an update is found."""
+        from GUI.auto_updater import UpdateChecker
+
+        checker = UpdateChecker(self)
+        self._startup_update_checker = checker
+
+        def _on_result(result):
+            self._startup_update_checker = None
+            if result.error or not result.update_available:
+                return
+            # An update is available — delegate to the settings page handler
+            self.settingsPage._handle_update_result(result)
+
+        checker.result_ready.connect(_on_result)
+        checker.start()
 
     def _build_ui(self):
         """Create child widgets and wire up signals.
@@ -107,8 +142,10 @@ class MainWindow(QMainWindow):
         self.sidebar.settingsButton.clicked.connect(self.showSettings)
         self.sidebar.backupButton.clicked.connect(self.showBackupBrowser)
 
+        self.mainContentStack = QStackedWidget()
+
         self.mainLayout.addWidget(self.sidebar)
-        self.mainLayout.addWidget(self.musicBrowser)
+        self.mainLayout.addWidget(self.mainContentStack)
         self.centralStack.addWidget(self.mainWidget)  # Index 0
 
         # Sync review page
@@ -127,6 +164,61 @@ class MainWindow(QMainWindow):
         self.backupBrowser = BackupBrowserWidget()
         self.backupBrowser.closed.connect(self.hideBackupBrowser)
         self.centralStack.addWidget(self.backupBrowser)  # Index 3
+
+        # No-device placeholder section (shown in content area; sidebar stays visible)
+        self.noDeviceWidget = QWidget()
+        no_device_layout = QVBoxLayout(self.noDeviceWidget)
+        no_device_layout.setContentsMargins((36), (36), (36), (36))
+        no_device_layout.setSpacing((12))
+
+        no_device_layout.addStretch(1)
+
+        title = QLabel("Select an iPod to continue")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setFont(QFont(FONT_FAMILY, Metrics.FONT_XXL, QFont.Weight.DemiBold))
+        title.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; background: transparent;")
+        no_device_layout.addWidget(title)
+
+        subtitle = QLabel(
+            "No device is currently selected.\n"
+            "Choose an iPod to access your library and sync tools."
+        )
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setFont(QFont(FONT_FAMILY, Metrics.FONT_MD))
+        subtitle.setStyleSheet(f"color: {Colors.TEXT_TERTIARY}; background: transparent;")
+        no_device_layout.addWidget(subtitle)
+
+        select_btn = QPushButton("Select Device")
+        select_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        select_btn.setFixedWidth((170))
+        select_btn.setFont(QFont(FONT_FAMILY, Metrics.FONT_MD, QFont.Weight.DemiBold))
+        select_btn.setStyleSheet(btn_css(
+            bg=Colors.ACCENT,
+            bg_hover=Colors.ACCENT_LIGHT,
+            bg_press=Colors.ACCENT,
+            fg=Colors.TEXT_ON_ACCENT,
+            border="none",
+            padding="8px 14px",
+        ))
+        select_btn.clicked.connect(self.selectDevice)
+
+        select_row = QHBoxLayout()
+        select_row.addStretch(1)
+        select_row.addWidget(select_btn)
+        select_row.addStretch(1)
+        no_device_layout.addLayout(select_row)
+
+        no_device_layout.addStretch(2)
+
+        self.mainContentStack.addWidget(self.musicBrowser)   # Index 0
+        self.mainContentStack.addWidget(self.noDeviceWidget)  # Index 1
+
+    def _show_default_page(self):
+        """Show main page and switch content area by device selection state."""
+        has_device = bool(DeviceManager.get_instance().device_path)
+        self.sidebar.setLibraryTabsVisible(has_device)
+        self.mainContentStack.setCurrentIndex(0 if has_device else 1)
+        self.centralStack.setCurrentIndex(0)
 
     def _on_theme_changed(self):
         """Rebuild the entire UI after a live theme switch."""
@@ -187,15 +279,18 @@ class MainWindow(QMainWindow):
         thread_pool = ThreadPoolSingleton.get_instance()
         thread_pool.clear()
 
-        self.musicBrowser.browserGrid.clearGrid()
-        self.musicBrowser.browserTrack.clearTable()
-
         from .imgMaker import clear_artworkdb_cache
         clear_artworkdb_cache()
 
+        self.musicBrowser.reloadData()
+
         if path:
+            self._show_default_page()
             # Start loading data (will emit data_ready when done)
             iTunesDBCache.get_instance().start_loading()
+        else:
+            self.sidebar.clearDeviceInfo()
+            self._show_default_page()
 
     def resyncDevice(self):
         """Rebuild the cache from the current device."""
@@ -240,6 +335,7 @@ class MainWindow(QMainWindow):
             audiobooks=len(classified["audiobook"]),
         )
         self._update_sidebar_visibility(classified)
+        self.musicBrowser.browserTrack.clearTable(clear_cache=True)
         self._update_podcast_statuses()
         self.musicBrowser.onDataReady()
 
@@ -333,8 +429,76 @@ class MainWindow(QMainWindow):
             f"Failed to rename iPod:\n{error_msg}"
         )
 
+    # ── Quick metadata write (track flags, rating, etc.) ────────────────────
+
+    def _is_sync_running(self) -> bool:
+        return (
+            (self._sync_worker is not None and self._sync_worker.isRunning())
+            or (self._sync_execute_worker is not None and self._sync_execute_worker.isRunning())
+        )
+
+    def _schedule_quick_meta_write(self):
+        """Debounce-schedule a quick metadata write after track flags change."""
+        if self._is_sync_running():
+            # Full sync is running — edits will be included there; skip quick write.
+            return
+        device = DeviceManager.get_instance()
+        if not device.device_path:
+            return
+        self._quick_meta_timer.start()  # Resets the timer if already running
+
+    def _start_quick_meta_write(self):
+        """Launch the quick metadata worker (called by debounce timer)."""
+        if self._is_sync_running():
+            return
+        if self._quick_meta_worker is not None and self._quick_meta_worker.isRunning():
+            # Already saving — reschedule so the in-flight write finishes first
+            self._quick_meta_timer.start()
+            return
+
+        device = DeviceManager.get_instance()
+        if not device.device_path:
+            return
+
+        cache = iTunesDBCache.get_instance()
+        edits = cache.pop_track_edits()
+        if not edits:
+            return
+
+        logger.info("Quick metadata write: %d track(s) edited", len(edits))
+        self.sidebar.show_save_indicator("saving")
+
+        self._quick_meta_worker = _QuickMetadataWorker(device.device_path, edits)
+        self._quick_meta_worker.finished_ok.connect(self._on_quick_meta_ok)
+        self._quick_meta_worker.failed.connect(self._on_quick_meta_failed)
+        self._quick_meta_worker.start()
+
+    def _on_quick_meta_ok(self):
+        logger.info("Quick metadata write completed successfully")
+        self.sidebar.show_save_indicator("saved")
+
+    def _on_quick_meta_failed(self, error_msg: str):
+        logger.error("Quick metadata write failed: %s", error_msg)
+        self.sidebar.show_save_indicator("error")
+        # Re-queue edits: they were already popped, so the worker's snapshot is
+        # now lost.  Inform the user so they can re-edit or do a full sync.
+        QMessageBox.warning(
+            self, "Save Failed",
+            f"Could not save track changes to iPod:\n{error_msg}\n\n"
+            "Your edits are lost for this session. "
+            "You can re-apply them and sync again."
+        )
+
+    # ── End quick metadata write ─────────────────────────────────────────────
+
     def startPCSync(self):
         """Start the PC to iPod sync process."""
+        # If a quick metadata write is in progress, cancel the pending timer and
+        # wait briefly for the worker to finish so we don't race on the DB.
+        self._quick_meta_timer.stop()
+        if self._quick_meta_worker is not None and self._quick_meta_worker.isRunning():
+            self._quick_meta_worker.wait(5000)
+
         device = DeviceManager.get_instance()
         if not device.device_path:
             QMessageBox.warning(
@@ -491,11 +655,79 @@ class MainWindow(QMainWindow):
         self._plan = plan  # Store for executeSyncPlan to access matched_pc_paths
         # Provide iPod tracks cache so the review widget can list artwork-missing tracks
         cache = iTunesDBCache.get_instance()
-        self.syncReview._ipod_tracks_cache = cache.get_tracks() or []
+        ipod_tracks = cache.get_tracks() or []
+        self.syncReview._ipod_tracks_cache = ipod_tracks
 
         # ── Populate playlist change info on the plan ──────────────
         self._populate_playlist_changes(plan, cache)
 
+        # ── Merge podcast managed plan ─────────────────────────────
+        # This requires refreshing RSS feeds and possibly downloading
+        # episodes, so it runs in the background.  The sync review is
+        # shown after the podcast plan is merged (or immediately if
+        # there are no podcast subscriptions).
+        browser = self.musicBrowser.podcastBrowser
+        store = browser._store
+        feeds = store.get_feeds() if store else []
+
+        if not feeds:
+            self.syncReview.show_plan(plan)
+            return
+
+        self.syncReview.update_progress("podcast_sync", 0, 0, "Refreshing podcast feeds…")
+
+        worker = Worker(
+            self._build_podcast_plan_bg, feeds, ipod_tracks, store,
+        )
+        worker.signals.result.connect(
+            lambda podcast_plan: self._on_podcast_plan_ready(plan, podcast_plan),
+        )
+        worker.signals.error.connect(
+            lambda err: self._on_podcast_plan_error(plan, err),
+        )
+        ThreadPoolSingleton.get_instance().start(worker)
+
+    def _build_podcast_plan_bg(self, feeds, ipod_tracks, store):
+        """Background: refresh feeds from RSS, then build podcast plan.
+
+        Episodes that need downloading are included in the plan — the
+        actual download happens during sync execution.
+        """
+        import logging
+        _log = logging.getLogger(__name__)
+
+        from PodcastManager.feed_parser import fetch_feed
+        from PodcastManager.podcast_sync import build_podcast_managed_plan
+
+        # Refresh all feeds from RSS to get full episode catalogs
+        refreshed = []
+        for feed in feeds:
+            try:
+                refreshed.append(fetch_feed(feed.feed_url, existing=feed))
+            except Exception as exc:
+                _log.warning("Podcast refresh failed for %s: %s", feed.title, exc)
+                refreshed.append(feed)
+        store.update_feeds(refreshed)
+
+        return build_podcast_managed_plan(refreshed, ipod_tracks, store)
+
+    def _on_podcast_plan_ready(self, plan, podcast_plan) -> None:
+        """Podcast plan built — merge into music plan and show."""
+        if podcast_plan.to_add:
+            plan.to_add.extend(podcast_plan.to_add)
+            plan.storage.bytes_to_add += podcast_plan.storage.bytes_to_add
+        if podcast_plan.to_remove:
+            plan.to_remove.extend(podcast_plan.to_remove)
+            plan.storage.bytes_to_remove += podcast_plan.storage.bytes_to_remove
+        self.syncReview.show_plan(plan)
+
+    def _on_podcast_plan_error(self, plan, error_tuple) -> None:
+        """Podcast plan failed — show music-only plan."""
+        import logging
+        _, value, _ = error_tuple
+        logging.getLogger(__name__).warning(
+            "Failed to build podcast plan: %s", value,
+        )
         self.syncReview.show_plan(plan)
 
     def _populate_playlist_changes(self, plan, cache: 'iTunesDBCache'):
@@ -544,7 +776,7 @@ class MainWindow(QMainWindow):
             self._sync_worker.requestInterruption()
         if self._sync_execute_worker is not None and self._sync_execute_worker.isRunning():
             self._sync_execute_worker.requestInterruption()
-        self.centralStack.setCurrentIndex(0)
+        self._show_default_page()
 
     def showSettings(self):
         """Show the settings page."""
@@ -556,7 +788,7 @@ class MainWindow(QMainWindow):
         # Re-read persisted settings to pick up changes
         settings = get_settings()
         self._last_pc_folder = settings.music_folder or self._last_pc_folder
-        self.centralStack.setCurrentIndex(0)
+        self._show_default_page()
 
     def showBackupBrowser(self):
         """Show the backup browser page."""
@@ -565,7 +797,7 @@ class MainWindow(QMainWindow):
 
     def hideBackupBrowser(self):
         """Return from backup browser to the main browsing view."""
-        self.centralStack.setCurrentIndex(0)
+        self._show_default_page()
 
     def executeSyncPlan(self, selected_items):
         """Execute the selected sync actions."""
@@ -606,6 +838,7 @@ class MainWindow(QMainWindow):
             to_sync_rating=rating_items,
             matched_pc_paths=original_plan.matched_pc_paths if original_plan else {},
             _stale_mapping_entries=original_plan._stale_mapping_entries if original_plan else [],
+            _integrity_removals=original_plan._integrity_removals if original_plan else [],
             mapping=original_plan.mapping if original_plan else None,
             playlists_to_add=original_plan.playlists_to_add if (original_plan and include_playlists) else [],
             playlists_to_edit=original_plan.playlists_to_edit if (original_plan and include_playlists) else [],
@@ -670,17 +903,13 @@ class MainWindow(QMainWindow):
         """Mark synced podcast episodes as 'on_ipod' in the subscription store."""
         try:
             browser = self.musicBrowser.podcastBrowser
-            store = browser._store
-            if not store:
+            if not browser._store:
                 return
 
             cache = iTunesDBCache.get_instance()
             ipod_tracks = cache.get_tracks() or []
 
-            from PodcastManager.podcast_sync import match_ipod_tracks
-            for feed in store.get_feeds():
-                match_ipod_tracks(feed, ipod_tracks)
-                store.update_feed(feed)
+            browser.reconcile_ipod_statuses(ipod_tracks)
 
             # Refresh the podcast browser episode table so status is visible
             browser.refresh_episodes()
@@ -701,8 +930,7 @@ class MainWindow(QMainWindow):
         clear_artworkdb_cache()
 
         # Clear UI so the reload starts from a clean slate
-        self.musicBrowser.browserGrid.clearGrid()
-        self.musicBrowser.browserTrack.clearTable()
+        self.musicBrowser.reloadData()
 
         cache.start_loading()
 
@@ -1287,7 +1515,7 @@ class iTunesDBCache(QObject):
         self._track_id_index: dict | None = None  # trackID -> track dict
         # User-created/edited playlists (persisted in memory until sync)
         self._user_playlists: list[dict] = []
-        # Pending track flag edits: dbid -> { field: (original, new), ... }
+        # Pending track flag edits: db_id -> { field: (original, new), ... }
         # Originals are captured on first edit so the diff engine can
         # revert in-memory track dicts before comparing.
         self._track_edits: dict[int, dict[str, tuple]] = {}
@@ -1530,10 +1758,10 @@ class iTunesDBCache(QObject):
         """
         with self._lock:
             for track in tracks:
-                dbid = track.get("db_id", 0)
-                if not dbid:
+                db_id = track.get("db_id", 0)
+                if not db_id:
                     continue
-                edits = self._track_edits.setdefault(dbid, {})
+                edits = self._track_edits.setdefault(db_id, {})
                 for key, value in changes.items():
                     if key in edits:
                         # Already edited — keep the *original* value, update new
@@ -1551,7 +1779,7 @@ class iTunesDBCache(QObject):
         self.tracks_changed.emit()
 
     def get_track_edits(self) -> dict[int, dict[str, tuple]]:
-        """Get all pending track flag edits: dbid → {field: (original, new)}."""
+        """Get all pending track flag edits: db_id → {field: (original, new)}."""
         with self._lock:
             return dict(self._track_edits)
 
@@ -1564,6 +1792,13 @@ class iTunesDBCache(QObject):
         """Clear pending track edits (called after successful sync)."""
         with self._lock:
             self._track_edits.clear()
+
+    def pop_track_edits(self) -> "dict[int, dict[str, tuple]]":
+        """Atomically return and clear all pending track edits."""
+        with self._lock:
+            edits = dict(self._track_edits)
+            self._track_edits.clear()
+            return edits
 
     def set_data(self, data: dict, device_path: str):
         """Set cached data, build indexes, and emit ready signal."""
@@ -1879,6 +2114,80 @@ class _DeviceRenameWorker(QThread):
                 playlists=playlists,
                 smart_playlists=smart_playlists,
                 master_playlist_name=self._new_name,
+            )
+
+            if success:
+                self.finished_ok.emit()
+            else:
+                self.failed.emit("Database write returned False.")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.failed.emit(str(e))
+
+
+class _QuickMetadataWorker(QThread):
+    """Write pending track-flag edits directly to the iPod, bypassing full sync.
+
+    Reads the existing iTunesDB, applies the supplied ``track_edits`` snapshot
+    (db_id → {field: (orig, new)}), and writes the database back.  The worker
+    operates entirely on the snapshot passed at construction time; any edits
+    made after construction are not included and remain pending in the cache.
+    """
+
+    finished_ok = pyqtSignal()
+    failed = pyqtSignal(str)
+
+    def __init__(self, ipod_path: str, track_edits: "dict[int, dict[str, tuple]]"):
+        super().__init__()
+        self._ipod_path = ipod_path
+        self._track_edits = track_edits  # snapshot: db_id → {field: (orig, new)}
+
+    def run(self):
+        try:
+            from SyncEngine.sync_executor import SyncExecutor, _SyncContext
+            from SyncEngine.mapping import MappingFile
+
+            executor = SyncExecutor(self._ipod_path)
+            existing_db = executor._read_existing_database()
+            existing_tracks_data = existing_db["tracks"]
+            existing_playlists_raw = list(existing_db["playlists"])
+            existing_smart_raw = list(existing_db["smart_playlists"])
+
+            # Apply edits to the raw track dicts before converting to TrackInfo
+            for t in existing_tracks_data:
+                db_id = t.get("db_id", 0)
+                if db_id in self._track_edits:
+                    for field, (_, new_val) in self._track_edits[db_id].items():
+                        t[field] = new_val
+
+            all_tracks = [
+                executor._track_dict_to_info(t) for t in existing_tracks_data
+            ]
+
+            ctx = _SyncContext(
+                plan=None,  # type: ignore[arg-type]
+                mapping=MappingFile(),
+                progress_callback=None,
+                dry_run=False,
+                aac_quality="normal",
+                write_back_to_pc=False,
+                _is_cancelled=None,
+            )
+            ctx.existing_tracks_data = existing_tracks_data
+            ctx.existing_playlists_raw = existing_playlists_raw
+            ctx.existing_smart_raw = existing_smart_raw
+
+            master_name, playlists, smart_playlists = executor._build_and_evaluate_playlists(
+                ctx, all_tracks,
+            )
+
+            success = executor._write_database(
+                tracks=all_tracks,
+                playlists=playlists,
+                smart_playlists=smart_playlists,
+                master_playlist_name=master_name,
             )
 
             if success:

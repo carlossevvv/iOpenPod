@@ -6,7 +6,7 @@ import traceback
 
 
 def _get_log_dir() -> str:
-    """Get log directory, defaulting to ~/iOpenPod/logs."""
+    """Get log directory, defaulting to platform-appropriate location."""
     # Check for user-configured log directory in settings
     try:
         from settings import AppSettings
@@ -145,7 +145,16 @@ sys.excepthook = global_exception_handler
 
 
 def run_pyqt_app():
-    logger.info("iOpenPod starting — log file: %s", _log_file_path)
+    from GUI.settings import get_version
+    logger.info("iOpenPod v%s starting — log file: %s", get_version(), _log_file_path)
+
+    # On Linux, PyInstaller-bundled Qt platforminputcontexts plugins
+    # (fcitx, ibus, compose) can ABI-clash with the host's input method
+    # framework, causing SIGSEGV on any keypress.  Disable them at
+    # runtime as a safety net (the .spec also excludes them at build time).
+    if sys.platform == 'linux' and getattr(sys, 'frozen', False):
+        os.environ.setdefault('QT_IM_MODULE', '')
+
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtGui import QIcon

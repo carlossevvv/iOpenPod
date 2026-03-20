@@ -31,8 +31,18 @@ from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
 
-# Default backup directory
-_DEFAULT_BACKUP_DIR = os.path.join(os.path.expanduser("~"), "iOpenPod", "backups")
+# Default backup directory (XDG-aware on Linux)
+
+
+def _resolve_default_backup_dir() -> str:
+    try:
+        from settings import _default_data_dir
+        return os.path.join(_default_data_dir(), "backups")
+    except Exception:
+        return os.path.join(os.path.expanduser("~"), "iOpenPod", "backups")
+
+
+_DEFAULT_BACKUP_DIR = _resolve_default_backup_dir()
 
 # Number of worker threads for parallel I/O.
 # iPod is on USB (single bus) so diminishing returns above ~4,
@@ -161,7 +171,9 @@ class BackupManager:
 
         # Phase 1: Discover all files
         if progress_callback:
-            progress_callback(BackupProgress("scanning", 0, 0, message="Scanning iPod files…"))
+            progress_callback(BackupProgress(
+                "scanning", 0, 0, message="Enumerating iPod files…"
+            ))
 
         all_files = self._walk_device(ipod_root)
         total_files = len(all_files)
@@ -171,6 +183,12 @@ class BackupManager:
             return None
 
         logger.info(f"Backup: found {total_files} files to process")
+
+        if progress_callback:
+            progress_callback(BackupProgress(
+                "scanning", 0, total_files,
+                message=f"Found {total_files:,} files, checking cache…"
+            ))
 
         # Phase 2: Hash files and copy new blobs — parallelized
         #
@@ -215,11 +233,11 @@ class BackupManager:
                 return None
 
             processed += 1
-            if progress_callback and (processed == 1 or processed % 200 == 0):
+            if progress_callback and (processed == 1 or processed % 50 == 0):
                 progress_callback(BackupProgress(
                     "hashing", processed, total_files,
                     current_file=rel_path,
-                    message=f"Processing {processed}/{total_files}: {rel_path}"
+                    message=f"Processing {processed:,}/{total_files:,}: {rel_path}"
                 ))
 
             try:
@@ -232,6 +250,12 @@ class BackupManager:
             except (OSError, PermissionError) as e:
                 skipped_files += 1
                 logger.warning(f"Backup: could not store cached {rel_path}: {e}")
+
+        if progress_callback and uncached:
+            progress_callback(BackupProgress(
+                "hashing", processed, total_files,
+                message=f"{len(cached_hits):,} cached, hashing {len(uncached):,} remaining…"
+            ))
 
         # 2b. Parallel hash + store for uncached files
         if uncached:
@@ -468,12 +492,18 @@ class BackupManager:
         # files over slow USB. New/uncached files are hashed in parallel.
         if progress_callback:
             progress_callback(BackupProgress(
-                "scanning", 0, 0, message="Scanning current iPod files…"
+                "scanning", 0, 0, message="Enumerating iPod files…"
             ))
 
         hash_cache = self._load_hash_cache()
         ipod_files = self._walk_device(ipod_root)
         ipod_total = len(ipod_files)
+
+        if progress_callback:
+            progress_callback(BackupProgress(
+                "scanning", 0, ipod_total,
+                message=f"Found {ipod_total:,} files, checking cache…"
+            ))
 
         # Build current state: {rel_path: hash}
         current_hashes: dict[str, str] = {}
@@ -499,6 +529,15 @@ class BackupManager:
         for rel_path, file_hash in cached_scan:
             current_hashes[rel_path] = file_hash
             scanned += 1
+
+        if progress_callback:
+            msg = (f"{len(cached_scan):,} files matched cache"
+                   f", hashing {len(uncached_scan):,} remaining…"
+                   if uncached_scan else
+                   f"All {len(cached_scan):,} files matched cache")
+            progress_callback(BackupProgress(
+                "scanning", scanned, ipod_total, message=msg,
+            ))
 
         # Slow path: hash uncached files in parallel
         if uncached_scan:
@@ -528,11 +567,18 @@ class BackupManager:
                         rp = futures[future]
                         logger.warning(f"Restore scan: could not hash {rp}: {e}")
 
-                    if progress_callback and scanned % 100 == 0:
+                    if progress_callback and scanned % 10 == 0:
                         progress_callback(BackupProgress(
                             "scanning", scanned, ipod_total,
-                            message=f"Scanning {scanned}/{ipod_total} iPod files…"
+                            message=f"Hashing {scanned:,}/{ipod_total:,} iPod files…"
                         ))
+
+        if progress_callback:
+            progress_callback(BackupProgress(
+                "scanning", ipod_total, ipod_total,
+                message=f"Scan complete — {len(cached_scan):,} cached, "
+                f"{len(uncached_scan):,} hashed"
+            ))
 
         logger.info(
             f"Restore scan: {len(cached_scan)} cached, "
@@ -733,7 +779,7 @@ class BackupManager:
             try:
                 with open(mf, "r", encoding="utf-8") as f:
                     data = json.load(f)
-            except (json.JSONDecodeError, OSError) as e:
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
                 logger.warning(f"Could not read snapshot {mf.name}: {e}")
                 continue
 
@@ -831,7 +877,7 @@ class BackupManager:
                 with open(manifests[0], "r", encoding="utf-8") as f:
                     data = json.load(f)
                 device_name = data.get("device_name", child.name)
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 pass
 
             devices.append({
@@ -859,7 +905,7 @@ class BackupManager:
             with open(manifests[0], "r", encoding="utf-8") as f:
                 data = json.load(f)
             return data.get("files")
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             return None
 
     def _walk_device(self, ipod_root: Path) -> list[tuple[str, Path]]:
@@ -952,7 +998,7 @@ class BackupManager:
         try:
             with open(manifest_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
             logger.error(f"Could not read snapshot {snapshot_id}: {e}")
             return None
 
@@ -963,7 +1009,7 @@ class BackupManager:
         try:
             with open(self.hashcache_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             return {}
 
     def _save_hash_cache(self, cache: dict[str, str]):
@@ -992,7 +1038,7 @@ class BackupManager:
             try:
                 with open(mf, "r", encoding="utf-8") as f:
                     data = json.load(f)
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 continue
             for file_info in data.get("files", {}).values():
                 h = file_info.get("hash")

@@ -137,14 +137,11 @@ def _find_ffprobe() -> Optional[str]:
 
 
 @lru_cache(maxsize=1)
-def _best_aac_encoder() -> str:
-    """Return the best available AAC encoder.
-
-    Preference: libfdk_aac (Fraunhofer) > aac_at (macOS AudioToolbox) > aac.
-    """
+def available_aac_encoders() -> set[str]:
+    """Return the set of AAC encoders exposed by the current ffmpeg build."""
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
-        return "aac"
+        return set()
     try:
         r = subprocess.run(
             [ffmpeg, "-encoders"],
@@ -153,12 +150,26 @@ def _best_aac_encoder() -> str:
             timeout=10, **_SP_KWARGS,
         )
         out = r.stdout
+        available: set[str] = set()
         for encoder in ("libfdk_aac", "aac_at", "aac"):
             if f" {encoder} " in out:
-                logger.info("Using AAC encoder: %s", encoder)
-                return encoder
+                available.add(encoder)
+        return available
     except Exception:
-        pass
+        return set()
+
+
+@lru_cache(maxsize=1)
+def _best_aac_encoder() -> str:
+    """Return the best available AAC encoder.
+
+    Preference: libfdk_aac (Fraunhofer) > aac_at (macOS AudioToolbox) > aac.
+    """
+    available = available_aac_encoders()
+    for encoder in ("libfdk_aac", "aac_at", "aac"):
+        if encoder in available:
+            logger.info("Using AAC encoder: %s", encoder)
+            return encoder
     return "aac"
 
 
@@ -229,7 +240,7 @@ def probe_video_needs_transcode(
     if not probe:
         return True
 
-    max_w, max_h = _get_video_limits()
+    max_w, max_h, max_fps, *_ = _get_video_caps()
 
     try:
         r = subprocess.run(
@@ -257,6 +268,15 @@ def probe_video_needs_transcode(
                 return True
             if int(s.get("height", 9999)) > max_h:
                 return True
+            # Check frame rate — r_frame_rate is a fraction string like "60/1"
+            r_fr = s.get("r_frame_rate", "0/1")
+            try:
+                num, den = (int(x) for x in r_fr.split("/"))
+                fps = num / den if den else 0
+                if fps > max_fps + 0.5:   # 0.5 tolerance for rounding
+                    return True
+            except (ValueError, ZeroDivisionError):
+                pass
             video_ok = True
         elif ct == "audio":
             if s.get("codec_name", "").lower() != "aac":
@@ -289,23 +309,98 @@ def _read_prefer_lossy() -> bool:
         return False
 
 
-def _get_video_limits() -> tuple[int, int]:
-    """Return (max_width, max_height) for the currently connected iPod.
+def _read_audio_settings() -> tuple[bool, bool, bool]:
+    """Return ``(normalize_sample_rate, mono_for_spoken, smart_quality_by_type)``
+    from settings, with safe defaults if settings are unavailable."""
+    try:
+        from settings import get_settings
+        s = get_settings()
+        return (
+            bool(getattr(s, "normalize_sample_rate", False)),
+            bool(getattr(s, "mono_for_spoken", True)),
+            bool(getattr(s, "smart_quality_by_type", True)),
+        )
+    except Exception:
+        return False, True, True
 
-    Reads from ``DeviceCapabilities`` via ``device_info.get_current_device()``.
-    Falls back to 640×480 when no device is connected or unrecognised.
+
+# stik atom values that indicate spoken-word / podcast content
+_SPOKEN_STIK_VALUES: frozenset[int] = frozenset({
+    1,   # Audiobook
+    2,   # Music Video (not spoken, included for safety — won't affect video path)
+    21,  # iTunes U
+    # Podcast stik is usually 0x15 (21) or detected via pcst atom instead
+})
+# Cleaner: podcast = stik 21, audiobook = stik 2 (per Apple's MP4 stik table)
+# Full Apple stik values: 0=Movie, 1=Normal(Music), 2=Audiobook, 5=Whacked Bookmark,
+# 6=Music Video, 9=Short Film, 10=TV Show, 11=Booklet, 14=Ringtone, 21=iTunes U,
+# 23=Voice Memo, 24=iTunes Extras
+_SPOKEN_STIK_VALUES = frozenset({2, 21})   # Audiobook, iTunes U
+
+
+def _probe_media_type(filepath: str | Path) -> int:
+    """Return the ``stik`` atom value from an MP4/M4A file, or -1 if absent/unreadable.
+
+    stik values relevant here:
+      2  = Audiobook
+      21 = iTunes U / Podcast (many podcast encoders write 21)
+    Additionally, the presence of a ``pcst`` (podcast) atom is checked as a fallback.
+    """
+    try:
+        from mutagen.mp4 import MP4
+        tags = MP4(str(filepath)).tags
+        if tags is None:
+            return -1
+        stik = tags.get("stik")
+        if stik:
+            return int(stik[0])
+        # Podcast fallback: pcst atom = True
+        pcst = tags.get("pcst")
+        if pcst and pcst[0]:
+            return 21
+    except Exception:
+        pass
+    return -1
+
+
+_DEFAULT_VIDEO_FPS = 30
+_DEFAULT_VIDEO_BITRATE = 0      # 0 = CRF-only, no hard bitrate cap
+_DEFAULT_VIDEO_LEVEL = "3.0"
+
+
+def _get_video_caps() -> tuple[int, int, int, int, str]:
+    """Return ``(max_width, max_height, max_fps, max_bitrate_kbps, h264_level)``
+    for the currently connected iPod.
+
+    Falls back to ``640×480 / 30 fps / no bitrate cap / Level 3.0`` when no
+    device is connected or the model is unrecognised.
     """
     try:
         from device_info import get_current_device
         from ipod_models import capabilities_for_family_gen
         dev = get_current_device()
-        if dev and dev.model_family and dev.generation:
-            caps = capabilities_for_family_gen(dev.model_family, dev.generation)
+        if dev and dev.model_family:
+            caps = capabilities_for_family_gen(
+                dev.model_family, dev.generation or "",
+            )
             if caps and caps.max_video_width > 0:
-                return caps.max_video_width, caps.max_video_height
+                return (
+                    caps.max_video_width,
+                    caps.max_video_height,
+                    caps.max_video_fps,
+                    caps.max_video_bitrate,
+                    caps.h264_level,
+                )
     except Exception:
         pass
-    return _DEFAULT_VIDEO_W, _DEFAULT_VIDEO_H
+    return _DEFAULT_VIDEO_W, _DEFAULT_VIDEO_H, _DEFAULT_VIDEO_FPS, _DEFAULT_VIDEO_BITRATE, _DEFAULT_VIDEO_LEVEL
+
+
+def _get_video_limits() -> tuple[int, int]:
+    """Return ``(max_width, max_height)`` — kept for callers that only need
+    the resolution.  Prefer ``_get_video_caps()`` for full device info."""
+    w, h, *_ = _get_video_caps()
+    return w, h
 
 
 def get_transcode_target(
@@ -426,26 +521,60 @@ def _aac_quality_args(quality: str) -> list[str]:
 # FFmpeg command builders
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _cmd_alac(ffmpeg: str, src: str, dst: str) -> list[str]:
+def _target_sample_rate(source_rate: int, normalize: bool) -> Optional[int]:
+    """Return the ``-ar`` value to pass to ffmpeg, or ``None`` to omit the flag.
+
+    Rules:
+    - If source rate is unknown (0) → cap to IPOD_MAX_SAMPLE_RATE.
+    - If source rate exceeds iPod limit → cap to IPOD_MAX_SAMPLE_RATE.
+    - If ``normalize`` is True → always output 44 100 Hz (CD rate).
+    - Otherwise → preserve source rate (no -ar flag).
+
+    The iPod hardware accepts 44 100 Hz and 48 000 Hz equally well; we avoid
+    upsampling 44.1 kHz sources to 48 000 Hz because that shifts the
+    sample_count stored in iTunesDB and causes early track termination.
+    """
+    if source_rate == 0 or source_rate > IPOD_MAX_SAMPLE_RATE:
+        return IPOD_MAX_SAMPLE_RATE
+    if normalize:
+        return 44_100
+    return None   # preserve source rate
+
+
+def _cmd_alac(ffmpeg: str, src: str, dst: str, normalize_sr: bool = False) -> list[str]:
+    props = probe_audio(src)
+    target_sr = _target_sample_rate(props.sample_rate, normalize_sr)
+    ar_args = ["-ar", str(target_sr)] if target_sr is not None else []
     return [
         ffmpeg, "-i", src,
         "-vn",
         "-acodec", "alac",
-        "-ar", str(IPOD_MAX_SAMPLE_RATE),
+        *ar_args,
         "-sample_fmt", "s16p",
         "-ac", str(IPOD_MAX_CHANNELS),
+        "-movflags", "+faststart",
         "-y", dst,
     ]
 
 
-def _cmd_aac(ffmpeg: str, src: str, dst: str, quality: str) -> list[str]:
+def _cmd_aac(
+    ffmpeg: str, src: str, dst: str, quality: str,
+    normalize_sr: bool = False,
+    mono: bool = False,
+) -> list[str]:
+    props = probe_audio(src)
+    target_sr = _target_sample_rate(props.sample_rate, normalize_sr)
+    ar_args = ["-ar", str(target_sr)] if target_sr is not None else []
+    # Mono downmix: spoken-word at 64 kbps sounds better in mono (~50% smaller)
+    channels = 1 if mono else IPOD_MAX_CHANNELS
     return [
         ffmpeg, "-i", src,
         "-vn",
         "-acodec", _best_aac_encoder(),
-        "-ar", str(IPOD_MAX_SAMPLE_RATE),
-        "-ac", str(IPOD_MAX_CHANNELS),
+        *ar_args,
+        "-ac", str(channels),
         *_aac_quality_args(quality),
+        "-movflags", "+faststart",
         "-y", dst,
     ]
 
@@ -454,7 +583,7 @@ def _cmd_video(
     ffmpeg: str, src: str, dst: str,
     quality: str, crf: int, preset: str,
 ) -> list[str]:
-    max_w, max_h = _get_video_limits()
+    max_w, max_h, max_fps, max_bitrate, h264_level = _get_video_caps()
 
     # Rotate portrait videos 90° CW when the target is landscape —
     # a tiny centred strip wastes most of the iPod's fixed-landscape screen.
@@ -468,15 +597,25 @@ def _cmd_video(
         ":force_original_aspect_ratio=decrease,"
         "scale='trunc(iw/2)*2':'trunc(ih/2)*2'"
     )
+    # Cap frame rate to device maximum (handles 60fps sources for Nano 3G/4G,
+    # and prevents excessive bitrate on high-fps content)
+    vf_parts.append(f"fps=fps={max_fps}")
+
+    # Hard bitrate ceiling — enforced on devices with Level 1.3 decoders
+    # (Nano 3G/4G: 768 kbps).  Uses a 2× buffer so the encoder has headroom.
+    bitrate_args: list[str] = []
+    if max_bitrate > 0:
+        bitrate_args = ["-maxrate", f"{max_bitrate}k", "-bufsize", f"{max_bitrate * 2}k"]
 
     return [
         ffmpeg, "-i", src,
         "-map", "0:v:0", "-map", "0:a:0",
         "-vcodec", "libx264",
-        "-profile:v", "baseline", "-level", "3.0",
+        "-profile:v", "baseline", "-level", h264_level,
         "-pix_fmt", "yuv420p",
         "-vf", ",".join(vf_parts),
         "-crf", str(crf), "-preset", preset,
+        *bitrate_args,
         "-acodec", _best_aac_encoder(),
         "-ac", str(IPOD_MAX_CHANNELS),
         "-ar", str(IPOD_MAX_SAMPLE_RATE),
@@ -549,6 +688,7 @@ def transcode(
     src, dst = str(source_path), str(out)
 
     crf, preset = 23, "fast"
+    normalize_sr, mono_for_spoken, smart_by_type = _read_audio_settings()
     try:
         from settings import get_settings
         _s = get_settings()
@@ -557,12 +697,27 @@ def transcode(
     except Exception:
         pass
 
+    # Smart quality: override aac_quality for podcast/audiobook content types
+    effective_quality = aac_quality
+    if smart_by_type and target == TranscodeTarget.AAC:
+        media_type = _probe_media_type(source_path)
+        if media_type in _SPOKEN_STIK_VALUES:
+            effective_quality = "spoken"
+            logger.debug(
+                "smart_quality_by_type: stik=%d → spoken for %s",
+                media_type, source_path.name,
+            )
+
+    # Mono downmix: only for spoken-word AAC transcodes
+    use_mono = mono_for_spoken and effective_quality == "spoken" and target == TranscodeTarget.AAC
+
     if target == TranscodeTarget.ALAC:
-        cmd = _cmd_alac(ffmpeg, src, dst)
+        cmd = _cmd_alac(ffmpeg, src, dst, normalize_sr=normalize_sr)
     elif target == TranscodeTarget.AAC:
-        cmd = _cmd_aac(ffmpeg, src, dst, aac_quality)
+        cmd = _cmd_aac(ffmpeg, src, dst, effective_quality,
+                       normalize_sr=normalize_sr, mono=use_mono)
     else:
-        cmd = _cmd_video(ffmpeg, src, dst, aac_quality, crf, preset)
+        cmd = _cmd_video(ffmpeg, src, dst, effective_quality, crf, preset)
 
     return _run_transcode(cmd, source_path, out, target, progress_callback)
 

@@ -757,7 +757,8 @@ def _find_mount_macos(usb_serial: str) -> Optional[str]:
         proc = subprocess.run(
             ["ioreg", "-r", "-c", "IOUSBHostDevice", "-n", "iPod",
              "-l", "-d", "20", "-w", "0"],
-            capture_output=True, text=True, timeout=8,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=8,
         )
         if proc.returncode == 0:
             current_serial = ""
@@ -811,7 +812,8 @@ def _find_mount_macos(usb_serial: str) -> Optional[str]:
     # Last resort: parse mount output
     try:
         proc = subprocess.run(
-            ["mount"], capture_output=True, text=True, timeout=5,
+            ["mount"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=5,
         )
         for line in proc.stdout.splitlines():
             if bsd_disk in line and " on /Volumes/" in line:
@@ -907,7 +909,8 @@ def _find_mount_windows(usb_serial: str) -> Optional[str]:
         proc = subprocess.run(
             ["wmic", "diskdrive", "where", "InterfaceType='USB'",
              "get", "DeviceID,PNPDeviceID", "/format:csv"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=15,
             **_SP_KWARGS,
         )
         if proc.returncode != 0:
@@ -982,7 +985,8 @@ def _find_mount_windows_ps(usb_serial: str) -> Optional[str]:
     try:
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_script],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=20,
             **_SP_KWARGS,
         )
         if proc.returncode == 0 and proc.stdout.strip():

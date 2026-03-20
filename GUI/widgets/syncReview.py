@@ -24,7 +24,7 @@ from SyncEngine.eta import ETATracker
 
 from .formatters import format_size as _format_size, format_duration_mmss as _format_duration
 from ..glyphs import glyph_pixmap
-from ..styles import Colors, FONT_FAMILY, Metrics, btn_css, scrollbar_css
+from ..styles import Colors, FONT_FAMILY, Metrics, btn_css, make_scroll_area
 
 import os
 import logging
@@ -452,9 +452,18 @@ class SyncTrackRow(QFrame):
                 border-radius: {(3)}px;
                 background: transparent;
             }}
+            QCheckBox::indicator:hover {{
+                border-color: {accent};
+                background: transparent;
+            }}
             QCheckBox::indicator:checked {{
                 border-color: {accent};
                 background: {accent};
+            }}
+            QCheckBox::indicator:checked:hover {{
+                border-color: {accent};
+                background: {accent};
+                opacity: 0.85;
             }}
         """)
         self.cb.toggled.connect(self.toggled.emit)
@@ -536,7 +545,7 @@ class SyncTrackRow(QFrame):
                 self.badge_label.setText(_format_duration(ipod.get("length", 0)))
             else:
                 self.title_label.setText(item.description or "Unknown track")
-                self.detail_label.setText(f"Orphaned mapping (dbid={item.dbid})")
+                self.detail_label.setText(f"Orphaned mapping (db_id={item.db_id})")
 
         elif item.action == SyncAction.UPDATE_FILE and track:
             self.title_label.setText(track.title or track.filename)
@@ -1147,17 +1156,8 @@ class SyncReviewWidget(QWidget):
         content_layout.addWidget(self._storage_frame)
 
         # Scroll area for category cards
-        self._scroll = QScrollArea(content_widget)
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet(f"""
-            QScrollArea {{
-                background: transparent;
-                border: none;
-            }}
-            {scrollbar_css()}
-        """)
+        self._scroll = make_scroll_area()
+        self._scroll.setParent(content_widget)
 
         self._cards_container = QWidget(self._scroll)
         self._cards_container.setStyleSheet("background: transparent;")
@@ -1599,8 +1599,8 @@ class SyncReviewWidget(QWidget):
             for t in ir.missing_files:
                 card.add_info_row(t.get("Title", "Unknown"),
                                   f"{t.get('Artist', 'Unknown')} · File missing from iPod")
-            for fp, dbid in ir.stale_mappings:
-                card.add_info_row(f"Stale mapping (dbid={dbid})", "Removed from mapping")
+            for fp, db_id in ir.stale_mappings:
+                card.add_info_row(f"Stale mapping (db_id={db_id})", "Removed from mapping")
             for orphan in ir.orphan_files[:20]:
                 card.add_info_row(orphan.name, "Orphan file deleted")
             if len(ir.orphan_files) > 20:
@@ -2248,7 +2248,12 @@ class SyncReviewWidget(QWidget):
             and bool(self._plan.playlists_to_add or self._plan.playlists_to_edit or self._plan.playlists_to_remove)
         )
 
-        if not selected_items and not playlists_selected:
+        has_integrity_fixes = (
+            self._plan is not None
+            and bool(getattr(self._plan, '_integrity_removals', []))
+        )
+
+        if not selected_items and not playlists_selected and not has_integrity_fixes:
             QMessageBox.information(self, "No Selection", "Please select items to sync.")
             return
 
@@ -2288,6 +2293,10 @@ class SyncReviewWidget(QWidget):
                 msg_parts.append(f"Update {pl_edit} playlists")
             if pl_remove:
                 msg_parts.append(f"Remove {pl_remove} playlists")
+
+        if has_integrity_fixes:
+            n = len(self._plan._integrity_removals)
+            msg_parts.append(f"Clean {n} ghost tracks (missing files) from database")
 
         msg = "This will:\n• " + "\n• ".join(msg_parts) + "\n\nContinue?"
 

@@ -3,9 +3,14 @@ iPod device picker dialog.
 
 Scans all drives for connected iPods and presents them in a grid
 for the user to select. Includes a manual folder picker fallback.
+
+Automatically rescans when a new drive is mounted (cross-platform).
 """
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+import logging
+import sys
+
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -15,7 +20,84 @@ from PyQt6.QtWidgets import (
 from device_info import DeviceInfo
 from ..device_scanner import scan_for_ipods
 from ..ipod_images import get_ipod_image
-from ..styles import Colors, FONT_FAMILY, Metrics, btn_css, make_scroll_area
+from ..styles import Colors, FONT_FAMILY, Metrics, btn_css, accent_btn_css, make_scroll_area
+
+logger = logging.getLogger(__name__)
+
+
+class _DriveWatcher(QThread):
+    """Polls the OS for mounted volumes and emits *drives_changed* when the set changes.
+
+    Works on Windows, macOS, and Linux without any platform-specific
+    dependencies beyond the standard library.
+    """
+
+    drives_changed = pyqtSignal()
+
+    def __init__(self, interval_ms: int = 2000, parent=None):
+        super().__init__(parent)
+        self._interval_ms = interval_ms
+        self._running = True
+
+    # ── platform helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _current_volumes() -> set[str]:
+        """Return a set of currently mounted volume paths."""
+        if sys.platform == "win32":
+            return _DriveWatcher._volumes_windows()
+        elif sys.platform == "darwin":
+            return _DriveWatcher._volumes_macos()
+        else:
+            return _DriveWatcher._volumes_linux()
+
+    @staticmethod
+    def _volumes_windows() -> set[str]:
+        import ctypes
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+        drives: set[str] = set()
+        for letter_idx in range(26):
+            if bitmask & (1 << letter_idx):
+                drives.add(f"{chr(65 + letter_idx)}:\\")
+        return drives
+
+    @staticmethod
+    def _volumes_macos() -> set[str]:
+        from pathlib import Path
+        volumes_dir = Path("/Volumes")
+        if volumes_dir.is_dir():
+            return {str(p) for p in volumes_dir.iterdir() if p.is_dir()}
+        return set()
+
+    @staticmethod
+    def _volumes_linux() -> set[str]:
+        import os
+        from pathlib import Path
+        volumes: set[str] = set()
+        user = os.getenv("USER", "")
+        for base in [f"/media/{user}", f"/run/media/{user}", "/mnt"]:
+            p = Path(base)
+            if p.is_dir():
+                volumes.update(str(d) for d in p.iterdir() if d.is_dir())
+        return volumes
+
+    # ── thread loop ───────────────────────────────────────────────────
+
+    def run(self):
+        known = self._current_volumes()
+        while self._running:
+            self.msleep(self._interval_ms)
+            if not self._running:
+                break
+            current = self._current_volumes()
+            if current != known:
+                logger.debug("Drive change detected: added=%s removed=%s",
+                             current - known, known - current)
+                known = current
+                self.drives_changed.emit()
+
+    def stop(self):
+        self._running = False
 
 
 class _ScanThread(QThread):
@@ -150,8 +232,19 @@ class DevicePickerDialog(QDialog):
         self._cards: list[DeviceCard] = []
         self._scan_thread: _ScanThread | None = None
 
+        # Debounce timer — drives may settle over a second or two after mount
+        self._rescan_debounce = QTimer(self)
+        self._rescan_debounce.setSingleShot(True)
+        self._rescan_debounce.setInterval(1500)
+        self._rescan_debounce.timeout.connect(self._start_scan)
+
+        # Watch for drive additions/removals and auto-rescan
+        self._drive_watcher = _DriveWatcher(parent=self)
+        self._drive_watcher.drives_changed.connect(self._on_drives_changed)
+
         self._setup_ui()
         self._start_scan()
+        self._drive_watcher.start()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -238,23 +331,7 @@ class DevicePickerDialog(QDialog):
         self._select_btn.setFont(QFont(FONT_FAMILY, Metrics.FONT_MD, QFont.Weight.DemiBold))
         self._select_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._select_btn.setEnabled(False)
-        self._select_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {Colors.ACCENT_DIM};
-                border: 1px solid {Colors.ACCENT_BORDER};
-                border-radius: {Metrics.BORDER_RADIUS_SM}px;
-                color: {Colors.TEXT_ON_ACCENT};
-                padding: {(7)}px {(24)}px;
-            }}
-            QPushButton:hover {{
-                background: {Colors.ACCENT_HOVER};
-            }}
-            QPushButton:disabled {{
-                background: {Colors.SURFACE};
-                border: 1px solid {Colors.BORDER_SUBTLE};
-                color: {Colors.TEXT_DISABLED};
-            }}
-        """)
+        self._select_btn.setStyleSheet(accent_btn_css())
         self._select_btn.clicked.connect(self.accept)
         btn_layout.addWidget(self._select_btn)
 
@@ -327,6 +404,13 @@ class DevicePickerDialog(QDialog):
         self._select_btn.setEnabled(True)
         self._select_btn.setText(f"Select ({ipod.mount_name})")
 
+    def _on_drives_changed(self):
+        """A drive was added or removed — debounce and rescan."""
+        # Don't interrupt an in-progress scan
+        if self._scan_thread and self._scan_thread.isRunning():
+            return
+        self._rescan_debounce.start()
+
     def _browse_manually(self):
         """Open a standard folder picker dialog."""
         folder = QFileDialog.getExistingDirectory(
@@ -351,3 +435,9 @@ class DevicePickerDialog(QDialog):
                     "  <selected folder>/iPod_Control/iTunes/\n\n"
                     "Please select the root folder of your iPod.",
                 )
+
+    def done(self, a0):
+        """Stop the drive watcher before closing the dialog."""
+        self._drive_watcher.stop()
+        self._drive_watcher.wait()
+        super().done(a0)

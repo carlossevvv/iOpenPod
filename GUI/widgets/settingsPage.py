@@ -11,13 +11,14 @@ from PyQt6.QtCore import pyqtSignal, pyqtSlot, Qt, QUrl
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QCheckBox, QComboBox, QFrame, QScrollArea, QFileDialog,
-    QLineEdit, QStackedWidget, QProgressDialog,
+    QLineEdit, QStackedWidget, QProgressDialog, QSpinBox,
 )
 from PyQt6.QtGui import QFont, QDesktopServices
 from pathlib import Path
 from ..styles import (
-    Colors, FONT_FAMILY, Metrics, btn_css, scrollbar_css,
+    Colors, FONT_FAMILY, Metrics, btn_css, danger_btn_css,
     sidebar_nav_css, sidebar_nav_selected_css,
+    input_css, combo_css, link_btn_css, make_scroll_area,
 )
 
 
@@ -85,12 +86,20 @@ class ToggleRow(SettingRow):
                 width: {(38)}px;
                 height: {(20)}px;
                 border-radius: {(10)}px;
-                background: {Colors.BORDER};
-                border: 1px solid {Colors.SURFACE_ACTIVE};
+                background: {Colors.SURFACE_ACTIVE};
+                border: 1px solid {Colors.BORDER};
+            }}
+            QCheckBox::indicator:hover {{
+                background: {Colors.SURFACE_HOVER};
+                border: 1px solid {Colors.BORDER_FOCUS};
             }}
             QCheckBox::indicator:checked {{
                 background: {Colors.ACCENT};
                 border: 1px solid {Colors.ACCENT};
+            }}
+            QCheckBox::indicator:checked:hover {{
+                background: {Colors.ACCENT_HOVER};
+                border: 1px solid {Colors.ACCENT_LIGHT};
             }}
         """)
         self.checkbox.toggled.connect(self.changed.emit)
@@ -117,35 +126,7 @@ class ComboRow(SettingRow):
         self.combo = QComboBox()
         self.combo.setFixedWidth((130))
         self.combo.setFont(QFont(FONT_FAMILY, Metrics.FONT_MD))
-        self.combo.setStyleSheet(f"""
-            QComboBox {{
-                background: {Colors.SURFACE_RAISED};
-                border: 1px solid {Colors.BORDER};
-                border-radius: {Metrics.BORDER_RADIUS_SM}px;
-                color: {Colors.TEXT_PRIMARY};
-                padding: {(5)}px {(10)}px;
-            }}
-            QComboBox:hover {{
-                border: 1px solid {Colors.BORDER_FOCUS};
-            }}
-            QComboBox::drop-down {{
-                border: none;
-                width: {(22)}px;
-            }}
-            QComboBox::down-arrow {{
-                image: none;
-                border: none;
-            }}
-            QComboBox QAbstractItemView {{
-                background: {Colors.DROPDOWN_BG};
-                color: {Colors.TEXT_PRIMARY};
-                selection-background-color: {Colors.ACCENT};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 4px;
-                padding: 2px;
-                outline: none;
-            }}
-        """)
+        self.combo.setStyleSheet(combo_css())
         if options:
             self.combo.addItems(options)
         if current:
@@ -158,6 +139,38 @@ class ComboRow(SettingRow):
     @property
     def value(self) -> str:
         return self.combo.currentText()
+
+
+class SpinRow(SettingRow):
+    """Setting row with a numeric spin box."""
+
+    changed = pyqtSignal(int)
+
+    def __init__(self, title: str, description: str = "",
+                 minimum: int = 1, maximum: int = 99, current: int = 3):
+        super().__init__(title, description)
+
+        self.spin = QSpinBox()
+        self.spin.setRange(minimum, maximum)
+        self.spin.setValue(current)
+        self.spin.setFixedWidth(80)
+        self.spin.setFont(QFont(FONT_FAMILY, Metrics.FONT_MD))
+        self.spin.setStyleSheet(input_css() + f"""
+            QSpinBox {{
+                padding: 4px 8px;
+                border-radius: 6px;
+            }}
+        """)
+        self.spin.valueChanged.connect(self.changed.emit)
+        self.add_control(self.spin)
+
+    @property
+    def value(self) -> int:
+        return self.spin.value()
+
+    @value.setter
+    def value(self, v: int):
+        self.spin.setValue(v)
 
 
 class FolderRow(SettingRow):
@@ -341,6 +354,30 @@ class ToolRow(SettingRow):
     def __init__(self, title: str, description: str = ""):
         super().__init__(title, description)
 
+        # Optional inline status pills (used by FFmpeg row).
+        self._aac_pills_wrap = QWidget()
+        pills_layout = QHBoxLayout(self._aac_pills_wrap)
+        pills_layout.setContentsMargins(0, 2, 0, 0)
+        pills_layout.setSpacing((6))
+
+        self._aac_pills: dict[str, QLabel] = {}
+        pill_labels = {
+            "base": "AAC (native)",
+            "at": "AAC AudioToolbox",
+            "fdk": "libfdk_aac",
+        }
+        for key in ("base", "at", "fdk"):
+            pill = QLabel(pill_labels[key])
+            pill.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
+            pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pill.setMinimumWidth((104))
+            self._aac_pills[key] = pill
+            pills_layout.addWidget(pill)
+        pills_layout.addStretch(1)
+
+        self._text_layout.addWidget(self._aac_pills_wrap)
+        self._aac_pills_wrap.hide()
+
         right_layout = QHBoxLayout()
         right_layout.setSpacing((8))
 
@@ -388,6 +425,38 @@ class ToolRow(SettingRow):
         self.status_label.setText("Downloading…")
         self.status_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; background: transparent; border: none;")
 
+    def set_aac_encoder_statuses(self, statuses: dict[str, bool]):
+        """Update AAC encoder pills (base/at/fdk) for FFmpeg rows."""
+        any_visible = False
+        for key, pill in self._aac_pills.items():
+            available = bool(statuses.get(key, False))
+            if available:
+                pill.setStyleSheet(
+                    f"""
+                    QLabel {{
+                        color: {Colors.SUCCESS};
+                        background: {Colors.SUCCESS_DIM};
+                        border: 1px solid {Colors.SUCCESS_BORDER};
+                        border-radius: {Metrics.BORDER_RADIUS_SM}px;
+                        padding: 2px 8px;
+                    }}
+                    """
+                )
+            else:
+                pill.setStyleSheet(
+                    f"""
+                    QLabel {{
+                        color: {Colors.TEXT_TERTIARY};
+                        background: {Colors.SURFACE_ALT};
+                        border: 1px solid {Colors.BORDER_SUBTLE};
+                        border-radius: {Metrics.BORDER_RADIUS_SM}px;
+                        padding: 2px 8px;
+                    }}
+                    """
+                )
+            any_visible = True
+        self._aac_pills_wrap.setVisible(any_visible)
+
 
 class _TokenRow(SettingRow):
     """Setting row with a token text input, validate button, and status."""
@@ -402,16 +471,7 @@ class _TokenRow(SettingRow):
             link_btn = QPushButton("Get token ↗")
             link_btn.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
             link_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            link_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent;
-                    border: none;
-                    color: {Colors.ACCENT};
-                    padding: 0;
-                    text-align: left;
-                }}
-                QPushButton:hover {{ color: {Colors.ACCENT_LIGHT}; text-decoration: underline; }}
-            """)
+            link_btn.setStyleSheet(link_btn_css())
             link_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(link_url)))
             # Insert into the left-side text layout (after title + description)
             self._text_layout.addWidget(link_btn)
@@ -431,18 +491,7 @@ class _TokenRow(SettingRow):
         self.token_input.setFixedWidth((220))
         self.token_input.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
         self.token_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.token_input.setStyleSheet(f"""
-            QLineEdit {{
-                background: {Colors.SURFACE_RAISED};
-                border: 1px solid {Colors.BORDER};
-                border-radius: {Metrics.BORDER_RADIUS_SM}px;
-                color: {Colors.TEXT_PRIMARY};
-                padding: {(5)}px {(8)}px;
-            }}
-            QLineEdit:focus {{
-                border: 1px solid {Colors.BORDER_FOCUS};
-            }}
-        """)
+        self.token_input.setStyleSheet(input_css())
         right_layout.addWidget(self.token_input)
 
         self.save_btn = QPushButton("Connect")
@@ -517,6 +566,62 @@ class _TokenRow(SettingRow):
 
 
 # ── Card container ──────────────────────────────────────────────────────────
+
+class _CacheSizeRow(SettingRow):
+    """Setting row showing live transcode-cache usage with a Clear button."""
+
+    def __init__(self):
+        super().__init__("Cache Status", "Calculating…")
+        self._clear_btn = QPushButton("Clear Cache")
+        self._clear_btn.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
+        self._clear_btn.setFixedWidth(110)
+        self._clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._clear_btn.setStyleSheet(danger_btn_css())
+        self._clear_btn.clicked.connect(self._on_clear)
+        self.add_control(self._clear_btn)
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Update the displayed size from the cache index (fast — no disk scan)."""
+        try:
+            from SyncEngine.transcode_cache import TranscodeCache
+            from settings import get_settings
+            s = get_settings()
+            cache_dir = Path(s.transcode_cache_dir) if s.transcode_cache_dir else None
+            stats = TranscodeCache.get_instance(cache_dir).stats()
+            gb = stats["total_size_gb"]
+            count = stats["total_files"]
+            max_gb = stats.get("max_size_gb", 0.0)
+            if max_gb > 0:
+                self.desc_label.setText(f"{gb:.2f} GB used of {max_gb:.0f} GB · {count:,} files")
+            else:
+                self.desc_label.setText(f"{gb:.2f} GB · {count:,} files")
+            self._clear_btn.setEnabled(count > 0)
+        except Exception as exc:
+            self.desc_label.setText(f"Unavailable ({exc})")
+
+    def _on_clear(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        from SyncEngine.transcode_cache import TranscodeCache
+        from settings import get_settings
+        reply = QMessageBox.question(
+            self,
+            "Clear Transcode Cache",
+            "Delete all cached transcoded files?\n\n"
+            "They will be re-created on the next sync.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            s = get_settings()
+            cache_dir = Path(s.transcode_cache_dir) if s.transcode_cache_dir else None
+            n = TranscodeCache.get_instance(cache_dir).clear()
+            self.desc_label.setText(f"Cleared — {n:,} files removed")
+            self._clear_btn.setEnabled(False)
+        except Exception as exc:
+            self.desc_label.setText(f"Error clearing cache: {exc}")
+
 
 class _SettingsCard(QFrame):
     """Ventura-style rounded card containing grouped setting rows."""
@@ -669,14 +774,8 @@ class SettingsPage(QWidget):
           - ``str``  → rendered as a small uppercase section header
           - ``QWidget`` → added directly (usually a _SettingsCard)
         """
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            " QScrollArea > QWidget > QWidget { background: transparent; }"
-            + scrollbar_css()
-        )
+        scroll = make_scroll_area(extra_css="QScrollArea > QWidget > QWidget { background: transparent; }"
+                                  )
 
         content = QWidget()
         content.setStyleSheet("background: transparent;")
@@ -720,7 +819,11 @@ class SettingsPage(QWidget):
             "Theme",
             "Choose the color scheme for the interface. "
             "System follows your OS preference.",
-            options=["Dark", "Light", "System"],
+            options=[
+                "Dark", "Light", "System",
+                "Catppuccin Mocha", "Catppuccin Macchiato",
+                "Catppuccin Frappé", "Catppuccin Latte",
+            ],
             current="Dark",
         )
 
@@ -793,23 +896,6 @@ class SettingsPage(QWidget):
             current="iPod Wins",
         )
 
-        # ── Podcast settings ─────────────────────────────────────────────
-        self.podcast_auto_sync = ComboRow(
-            "Auto-Sync Episodes",
-            "Automatically sync the latest N episodes of each subscribed "
-            "podcast to iPod during sync.  Set to Off for manual control.",
-            options=["Off", "1", "3", "5", "10", "25"],
-            current="Off",
-        )
-        self.podcast_max_downloaded = ComboRow(
-            "Max Downloaded Episodes",
-            "Limit how many episodes are kept downloaded per feed.  "
-            "Oldest episodes are deleted when the limit is exceeded.  "
-            "Unlimited keeps all downloaded episodes.",
-            options=["Unlimited", "10", "25", "50", "100"],
-            current="Unlimited",
-        )
-
         return self._make_page(
             "Sync",
             _SettingsCard(
@@ -817,11 +903,6 @@ class SettingsPage(QWidget):
                 self.write_back,
                 self.compute_sound_check,
                 self.rating_strategy,
-            ),
-            "Podcasts",
-            _SettingsCard(
-                self.podcast_auto_sync,
-                self.podcast_max_downloaded,
             ),
         )
 
@@ -870,14 +951,40 @@ class SettingsPage(QWidget):
             options=["Auto", "1", "2", "4", "6", "8"],
             current="Auto",
         )
+        self.mono_for_spoken = ToggleRow(
+            "Mono for Spoken Word",
+            "Downmix to mono when encoding at Spoken Word quality (64 kbps). "
+            "Mono at 64 kbps sounds significantly better than stereo and "
+            "cuts podcast/audiobook file sizes by roughly 50%.",
+        )
+        self.smart_quality_by_type = ToggleRow(
+            "Smart Quality by Content Type",
+            "Automatically use Spoken Word quality for podcasts, audiobooks, "
+            "and iTunes U files. Music tracks always use the configured "
+            "AAC Quality preset.",
+        )
+        self.normalize_sample_rate = ToggleRow(
+            "Normalize to 44.1 kHz",
+            "Always output audio at 44,100 Hz (CD rate). "
+            "Recommended for early iPods (1G–4G) that can have playback "
+            "quirks with 48 kHz ALAC, and reduces file size for "
+            "hi-res (96/192 kHz) FLAC sources.",
+        )
 
         return self._make_page(
             "Transcoding",
             _SettingsCard(
                 self.aac_quality,
                 self.prefer_lossy,
+                self.mono_for_spoken,
+                self.smart_quality_by_type,
+            ),
+            _SettingsCard(
                 self.video_crf,
                 self.video_preset,
+            ),
+            _SettingsCard(
+                self.normalize_sample_rate,
                 self.sync_workers,
             ),
         )
@@ -945,8 +1052,16 @@ class SettingsPage(QWidget):
         self.transcode_cache_dir = FolderRow(
             "Transcode Cache",
             "Where transcoded files are cached to avoid re-encoding "
-            "on future syncs. Leave empty for the default (~/iOpenPod/cache).",
+            "on future syncs. Leave empty for the platform default.",
         )
+        self.max_cache_size = ComboRow(
+            "Max Cache Size",
+            "Oldest cached files are automatically removed (LRU) to stay "
+            "within this limit. Set to Unlimited if storage is not a concern.",
+            options=["Unlimited", "1 GB", "2 GB", "5 GB", "10 GB", "20 GB", "50 GB"],
+            current="5 GB",
+        )
+        self.cache_status = _CacheSizeRow()
         self.settings_dir = FolderRow(
             "Settings Location",
             "Custom directory to store iOpenPod settings. Useful for "
@@ -955,7 +1070,7 @@ class SettingsPage(QWidget):
         self.log_dir = FolderRow(
             "Log Location",
             "Where iOpenPod writes log files and crash reports. "
-            "Leave empty for the default (~/iOpenPod/logs). "
+            "Leave empty for the platform default. "
             "Takes effect on next launch.",
         )
         self.reset_storage_row = ActionRow(
@@ -969,6 +1084,10 @@ class SettingsPage(QWidget):
             "Storage",
             _SettingsCard(
                 self.transcode_cache_dir,
+                self.max_cache_size,
+                self.cache_status,
+            ),
+            _SettingsCard(
                 self.settings_dir,
                 self.log_dir,
                 self.reset_storage_row,
@@ -979,7 +1098,7 @@ class SettingsPage(QWidget):
         self.backup_dir = FolderRow(
             "Backup Location",
             "Where full device backups are stored on your PC. "
-            "Leave empty for the default (~/iOpenPod/backups).",
+            "Leave empty for the platform default.",
         )
         self.backup_before_sync = ToggleRow(
             "Backup Before Sync",
@@ -1037,7 +1156,13 @@ class SettingsPage(QWidget):
         self.show_art.value = s.show_art_in_tracklist
 
         # Theme
-        theme_display = {"dark": "Dark", "light": "Light", "system": "System"}
+        theme_display = {
+            "dark": "Dark", "light": "Light", "system": "System",
+            "catppuccin-mocha": "Catppuccin Mocha",
+            "catppuccin-macchiato": "Catppuccin Macchiato",
+            "catppuccin-frappe": "Catppuccin Frappé",
+            "catppuccin-latte": "Catppuccin Latte",
+        }
         theme_text = theme_display.get(s.theme, "Dark")
         idx = self.theme_combo.combo.findText(theme_text)
         if idx >= 0:
@@ -1051,6 +1176,14 @@ class SettingsPage(QWidget):
             self.high_contrast.combo.setCurrentIndex(idx)
 
         self.transcode_cache_dir.value = s.transcode_cache_dir
+        # Max cache size combo
+        _size_map = {0.0: "Unlimited", 1.0: "1 GB", 2.0: "2 GB", 5.0: "5 GB",
+                     10.0: "10 GB", 20.0: "20 GB", 50.0: "50 GB"}
+        _size_text = _size_map.get(float(s.max_cache_size_gb), "5 GB")
+        idx = self.max_cache_size.combo.findText(_size_text)
+        if idx >= 0:
+            self.max_cache_size.combo.setCurrentIndex(idx)
+        self.cache_status.refresh()
         self.settings_dir.value = s.settings_dir
         self.log_dir.value = s.log_dir
         self.ffmpeg_path.value = s.ffmpeg_path
@@ -1058,17 +1191,6 @@ class SettingsPage(QWidget):
 
         self.backup_dir.value = s.backup_dir
         self.backup_before_sync.value = s.backup_before_sync
-
-        # Podcast settings
-        auto_val = str(s.podcast_auto_sync_count) if s.podcast_auto_sync_count else "Off"
-        idx = self.podcast_auto_sync.combo.findText(auto_val)
-        if idx >= 0:
-            self.podcast_auto_sync.combo.setCurrentIndex(idx)
-
-        max_val = str(s.podcast_max_downloaded) if s.podcast_max_downloaded else "Unlimited"
-        idx = self.podcast_max_downloaded.combo.findText(max_val)
-        if idx >= 0:
-            self.podcast_max_downloaded.combo.setCurrentIndex(idx)
 
         # Refresh tool status indicators
         self._refresh_tool_status()
@@ -1092,6 +1214,11 @@ class SettingsPage(QWidget):
 
         # Prefer lossy toggle
         self.prefer_lossy.value = s.prefer_lossy
+
+        # Audio encoding options
+        self.mono_for_spoken.value = s.mono_for_spoken
+        self.smart_quality_by_type.value = s.smart_quality_by_type
+        self.normalize_sample_rate.value = s.normalize_sample_rate
 
         # Video CRF → combo text
         crf_map = {18: "18 (High)", 20: "20 (Good)", 23: "23 (Balanced)", 26: "26 (Low)", 28: "28 (Very Low)"}
@@ -1121,6 +1248,9 @@ class SettingsPage(QWidget):
             self.rating_strategy.changed.connect(self._save)
             self.aac_quality.changed.connect(self._save)
             self.prefer_lossy.changed.connect(self._save)
+            self.mono_for_spoken.changed.connect(self._save)
+            self.smart_quality_by_type.changed.connect(self._save)
+            self.normalize_sample_rate.changed.connect(self._save)
             self.video_crf.changed.connect(self._save)
             self.video_preset.changed.connect(self._save)
             self.sync_workers.changed.connect(self._save)
@@ -1128,6 +1258,7 @@ class SettingsPage(QWidget):
             self.theme_combo.changed.connect(self._save)
             self.high_contrast.changed.connect(self._save)
             self.transcode_cache_dir.changed.connect(self._save)
+            self.max_cache_size.changed.connect(self._save)
             self.settings_dir.changed.connect(self._save)
             self.log_dir.changed.connect(self._save)
             self.ffmpeg_path.changed.connect(self._save_and_refresh_tools)
@@ -1136,8 +1267,6 @@ class SettingsPage(QWidget):
             self.backup_before_sync.changed.connect(self._save)
             self.max_backups.changed.connect(self._save)
             self.scrobble_on_sync.changed.connect(self._save)
-            self.podcast_auto_sync.changed.connect(self._save)
-            self.podcast_max_downloaded.changed.connect(self._save)
 
     def _save(self, *_args):
         """Read all controls back into AppSettings and persist."""
@@ -1160,7 +1289,13 @@ class SettingsPage(QWidget):
         s.show_art_in_tracklist = self.show_art.value
 
         # Theme
-        theme_keys = {"Dark": "dark", "Light": "light", "System": "system"}
+        theme_keys = {
+            "Dark": "dark", "Light": "light", "System": "system",
+            "Catppuccin Mocha": "catppuccin-mocha",
+            "Catppuccin Macchiato": "catppuccin-macchiato",
+            "Catppuccin Frappé": "catppuccin-frappe",
+            "Catppuccin Latte": "catppuccin-latte",
+        }
         old_theme, old_hc = s.theme, s.high_contrast
         s.theme = theme_keys.get(self.theme_combo.value, "dark")
 
@@ -1169,18 +1304,30 @@ class SettingsPage(QWidget):
         s.high_contrast = hc_keys.get(self.high_contrast.value, "off")
 
         s.transcode_cache_dir = self.transcode_cache_dir.value
+        # Parse max cache size
+        _size_keys = {"Unlimited": 0.0, "1 GB": 1.0, "2 GB": 2.0, "5 GB": 5.0,
+                      "10 GB": 10.0, "20 GB": 20.0, "50 GB": 50.0}
+        new_max_gb = _size_keys.get(self.max_cache_size.value, 5.0)
+        limit_lowered = (s.max_cache_size_gb > 0
+                         and (new_max_gb == 0 or new_max_gb < s.max_cache_size_gb))
+        s.max_cache_size_gb = new_max_gb
+        # If limit was lowered, evict immediately so cache stays within bounds
+        if not limit_lowered:
+            pass
+        else:
+            try:
+                from SyncEngine.transcode_cache import TranscodeCache
+                cache_dir = Path(s.transcode_cache_dir) if s.transcode_cache_dir else None
+                TranscodeCache.get_instance(cache_dir).trim_to_limit()
+                self.cache_status.refresh()
+            except Exception:
+                pass
         s.settings_dir = self.settings_dir.value
         s.log_dir = self.log_dir.value
         s.ffmpeg_path = self.ffmpeg_path.value
         s.fpcalc_path = self.fpcalc_path.value
         s.backup_dir = self.backup_dir.value
         s.backup_before_sync = self.backup_before_sync.value
-
-        # Podcast settings
-        auto_text = self.podcast_auto_sync.value
-        s.podcast_auto_sync_count = int(auto_text) if auto_text != "Off" else 0
-        max_text = self.podcast_max_downloaded.value
-        s.podcast_max_downloaded = int(max_text) if max_text != "Unlimited" else 0
 
         # Parse max backups
         mb_text = self.max_backups.value
@@ -1195,6 +1342,11 @@ class SettingsPage(QWidget):
 
         # Prefer lossy toggle
         s.prefer_lossy = self.prefer_lossy.value
+
+        # Audio encoding options
+        s.mono_for_spoken = self.mono_for_spoken.value
+        s.smart_quality_by_type = self.smart_quality_by_type.value
+        s.normalize_sample_rate = self.normalize_sample_rate.value
 
         # Parse video CRF (extract leading integer)
         crf_text = self.video_crf.value
@@ -1232,11 +1384,8 @@ class SettingsPage(QWidget):
 
     def _check_for_updates(self):
         """Check GitHub for a newer version in a background thread."""
-        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
-        from GUI.auto_updater import (
-            UpdateChecker, UpdateDownloader, UpdateResult,
-            stage_update, launch_bootstrap_and_exit,
-        )
+        from PyQt6.QtWidgets import QMessageBox
+        from GUI.auto_updater import UpdateChecker, UpdateResult
 
         self.version_row.action_btn.setEnabled(False)
         self.version_row.action_btn.setText("Checking…")
@@ -1258,131 +1407,139 @@ class SettingsPage(QWidget):
                 )
                 return
 
-            # Newer version available — ask the user
-            notes_preview = result.release_notes[:500]
-            if len(result.release_notes) > 500:
-                notes_preview += "…"
+            self._handle_update_result(result)
 
-            import sys as _sys
+        self._update_checker.result_ready.connect(_on_result)
+        self._update_checker.start()
 
-            if not getattr(_sys, "frozen", False):
-                # Running from source — no point downloading a binary
-                QMessageBox.information(
-                    self, "Update Available",
-                    f"A new version is available: v{result.latest_version}\n"
-                    f"(current: v{result.current_version})\n\n"
-                    f"{notes_preview}\n\n"
-                    "You are running from source.\n"
-                    "Run 'git pull' to get the latest changes.",
-                )
-                return
+    def _handle_update_result(self, result):
+        """Show update-available UI and optionally download/install."""
+        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
+        from GUI.auto_updater import (
+            UpdateDownloader, stage_update, launch_bootstrap_and_exit,
+        )
 
-            answer = QMessageBox.question(
+        notes_preview = result.release_notes[:500]
+        if len(result.release_notes) > 500:
+            notes_preview += "…"
+
+        import sys as _sys
+
+        if not getattr(_sys, "frozen", False):
+            # Running from source — no point downloading a binary
+            QMessageBox.information(
                 self, "Update Available",
                 f"A new version is available: v{result.latest_version}\n"
                 f"(current: v{result.current_version})\n\n"
                 f"{notes_preview}\n\n"
-                f"Download now?",
+                "You are running from source.\n"
+                "Run 'git pull' to get the latest changes.",
+            )
+            return
+
+        answer = QMessageBox.question(
+            self, "Update Available",
+            f"A new version is available: v{result.latest_version}\n"
+            f"(current: v{result.current_version})\n\n"
+            f"{notes_preview}\n\n"
+            f"Download now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if answer != QMessageBox.StandardButton.Yes:
+            # Open the release page in the browser instead
+            QDesktopServices.openUrl(QUrl(result.release_page))
+            return
+
+        if not result.download_url:
+            QMessageBox.information(
+                self, "No Binary Available",
+                "No pre-built binary was found for your platform.\n\n"
+                f"Visit {result.release_page} to download manually.",
+            )
+            QDesktopServices.openUrl(QUrl(result.release_page))
+            return
+
+        # Start download with progress dialog
+        progress = QProgressDialog(
+            "Downloading update…", "Cancel", 0, 100, self,
+        )
+        progress.setWindowTitle("iOpenPod Update")
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        # Keep a reference so it isn't garbage-collected
+        self._update_progress = progress
+
+        checksum_url = result.download_url + ".sha256"
+        downloader = UpdateDownloader(result.download_url, checksum_url, self)
+        self._update_downloader = downloader
+
+        def _on_progress(downloaded: int, total: int):
+            if progress.wasCanceled():
+                return
+            pct = int(downloaded * 100 / total) if total else 0
+            progress.setValue(pct)
+
+        def _on_finished(path_str: str):
+            # Disconnect cancel so closing the dialog doesn't kill
+            # the already-finished downloader or interfere with staging.
+            try:
+                progress.canceled.disconnect()
+            except TypeError:
+                pass
+            progress.close()
+            self._update_progress = None
+            if not path_str:
+                QMessageBox.warning(
+                    self, "Download Failed",
+                    "The update could not be downloaded.\n"
+                    "Check your internet connection and try again.",
+                )
+                return
+
+            from pathlib import Path as _Path
+            archive = _Path(path_str)
+
+            # Stage the update (extract to temp dir)
+            staged = stage_update(archive)
+            if not staged:
+                QMessageBox.warning(
+                    self, "Update Failed",
+                    "Could not extract the update archive.\n\n"
+                    f"The archive is at:\n{archive}\n"
+                    "You can extract it manually.",
+                )
+                return
+
+            answer2 = QMessageBox.question(
+                self, "Install Update & Restart?",
+                f"v{result.latest_version} is ready to install.\n\n"
+                "iOpenPod will close, apply the update, and "
+                "relaunch automatically.\n\n"
+                "Continue?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
-
-            if answer != QMessageBox.StandardButton.Yes:
-                # Open the release page in the browser instead
-                QDesktopServices.openUrl(QUrl(result.release_page))
-                return
-
-            if not result.download_url:
-                QMessageBox.information(
-                    self, "No Binary Available",
-                    "No pre-built binary was found for your platform.\n\n"
-                    f"Visit {result.release_page} to download manually.",
-                )
-                QDesktopServices.openUrl(QUrl(result.release_page))
-                return
-
-            # Start download with progress dialog
-            progress = QProgressDialog(
-                "Downloading update…", "Cancel", 0, 100, self,
-            )
-            progress.setWindowTitle("iOpenPod Update")
-            progress.setMinimumDuration(0)
-            progress.setAutoClose(False)
-            progress.setAutoReset(False)
-            # Keep a reference so it isn't garbage-collected
-            self._update_progress = progress
-
-            checksum_url = result.download_url + ".sha256"
-            downloader = UpdateDownloader(result.download_url, checksum_url, self)
-            self._update_downloader = downloader
-
-            def _on_progress(downloaded: int, total: int):
-                if progress.wasCanceled():
-                    return
-                pct = int(downloaded * 100 / total) if total else 0
-                progress.setValue(pct)
-
-            def _on_finished(path_str: str):
-                # Disconnect cancel so closing the dialog doesn't kill
-                # the already-finished downloader or interfere with staging.
-                try:
-                    progress.canceled.disconnect()
-                except TypeError:
-                    pass
-                progress.close()
-                self._update_progress = None
-                if not path_str:
-                    QMessageBox.warning(
-                        self, "Download Failed",
-                        "The update could not be downloaded.\n"
-                        "Check your internet connection and try again.",
-                    )
-                    return
-
-                from pathlib import Path as _Path
-                archive = _Path(path_str)
-
-                # Stage the update (extract to temp dir)
-                staged = stage_update(archive)
-                if not staged:
+            if answer2 == QMessageBox.StandardButton.Yes:
+                if launch_bootstrap_and_exit(staged):
+                    # Bootstrap is running — close the app so it
+                    # can replace our files and relaunch.
+                    from PyQt6.QtWidgets import QApplication
+                    app = QApplication.instance()
+                    if app:
+                        app.quit()
+                else:
                     QMessageBox.warning(
                         self, "Update Failed",
-                        "Could not extract the update archive.\n\n"
-                        f"The archive is at:\n{archive}\n"
-                        "You can extract it manually.",
+                        "Could not start the update installer.\n\n"
+                        f"The update files are at:\n{staged}\n"
+                        "You can copy them manually.",
                     )
-                    return
 
-                answer2 = QMessageBox.question(
-                    self, "Install Update & Restart?",
-                    f"v{result.latest_version} is ready to install.\n\n"
-                    "iOpenPod will close, apply the update, and "
-                    "relaunch automatically.\n\n"
-                    "Continue?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                if answer2 == QMessageBox.StandardButton.Yes:
-                    if launch_bootstrap_and_exit(staged):
-                        # Bootstrap is running — close the app so it
-                        # can replace our files and relaunch.
-                        from PyQt6.QtWidgets import QApplication
-                        app = QApplication.instance()
-                        if app:
-                            app.quit()
-                    else:
-                        QMessageBox.warning(
-                            self, "Update Failed",
-                            "Could not start the update installer.\n\n"
-                            f"The update files are at:\n{staged}\n"
-                            "You can copy them manually.",
-                        )
-
-            downloader.progress.connect(_on_progress)
-            downloader.finished_download.connect(_on_finished)
-            progress.canceled.connect(downloader.terminate)
-            downloader.start()
-
-        self._update_checker.result_ready.connect(_on_result)
-        self._update_checker.start()
+        downloader.progress.connect(_on_progress)
+        downloader.finished_download.connect(_on_finished)
+        progress.canceled.connect(downloader.terminate)
+        downloader.start()
 
     def _save_and_refresh_tools(self, *_args):
         """Save settings then refresh tool status indicators."""
@@ -1391,11 +1548,19 @@ class SettingsPage(QWidget):
 
     def _refresh_tool_status(self):
         """Check whether ffmpeg and fpcalc are reachable and update the UI."""
-        from SyncEngine.transcoder import find_ffmpeg
+        from SyncEngine.transcoder import find_ffmpeg, available_aac_encoders
         from SyncEngine.audio_fingerprint import find_fpcalc
 
         ffmpeg = find_ffmpeg()
         self.ffmpeg_tool.set_status(bool(ffmpeg), ffmpeg or "")
+        enc = available_aac_encoders() if ffmpeg else set()
+        self.ffmpeg_tool.set_aac_encoder_statuses(
+            {
+                "base": "aac" in enc,
+                "at": "aac_at" in enc,
+                "fdk": "libfdk_aac" in enc,
+            }
+        )
 
         fpcalc = find_fpcalc()
         self.fpcalc_tool.set_status(bool(fpcalc), fpcalc or "")

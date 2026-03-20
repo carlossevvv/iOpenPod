@@ -18,6 +18,9 @@ from typing import TYPE_CHECKING, Optional
 from .models import (
     PodcastEpisode,
     PodcastFeed,
+    STATUS_DOWNLOADED,
+    STATUS_DOWNLOADING,
+    STATUS_NOT_DOWNLOADED,
     STATUS_ON_IPOD,
 )
 
@@ -28,28 +31,126 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+class PodcastTrackMatcher:
+    """Fast matcher for resolving podcast episodes against iPod tracks.
+
+    The matcher pre-indexes iPod podcast tracks once, then can reconcile
+    many feeds without rebuilding lookup maps for each feed.
+    """
+
+    def __init__(self, ipod_tracks: list[dict]):
+        self._by_enclosure: dict[str, dict] = {}
+        self._by_title_album: dict[tuple[str, str], dict] = {}
+
+        for track in ipod_tracks:
+            media_type = track.get("media_type", 0)
+            if not (media_type & 0x04):
+                continue
+
+            enc_url = track.get("Podcast Enclosure URL", "")
+            if enc_url:
+                self._by_enclosure[enc_url] = track
+
+            title = track.get("Title", "")
+            album = track.get("Album", "")
+            if title and album:
+                self._by_title_album[(title.lower(), album.lower())] = track
+
+    def match_feed(self, feed: PodcastFeed) -> bool:
+        """Reconcile one feed against indexed iPod tracks.
+
+        Returns:
+            True if any episode state changed, else False.
+        """
+        changed = False
+
+        for ep in feed.episodes:
+            matched_track = None
+            if ep.audio_url:
+                matched_track = self._by_enclosure.get(ep.audio_url)
+            if not matched_track and ep.title and feed.title:
+                matched_track = self._by_title_album.get(
+                    (ep.title.lower(), feed.title.lower())
+                )
+
+            if matched_track:
+                new_db_id = matched_track.get("db_id", 0)
+                if ep.ipod_db_id != new_db_id or ep.status != STATUS_ON_IPOD:
+                    ep.ipod_db_id = new_db_id
+                    ep.status = STATUS_ON_IPOD
+                    changed = True
+                continue
+
+            # No longer present on iPod: clear stale db link and derive local status.
+            if ep.ipod_db_id != 0:
+                ep.ipod_db_id = 0
+                changed = True
+
+            # Keep transient download state if a transfer is currently running.
+            if ep.status == STATUS_DOWNLOADING:
+                continue
+
+            has_local_file = bool(ep.downloaded_path and os.path.exists(ep.downloaded_path))
+            if not has_local_file and ep.downloaded_path:
+                ep.downloaded_path = ""
+                changed = True
+
+            next_status = STATUS_DOWNLOADED if has_local_file else STATUS_NOT_DOWNLOADED
+            if ep.status != next_status:
+                ep.status = next_status
+                changed = True
+
+        return changed
+
+
 def episode_to_pc_track(
     episode: PodcastEpisode,
     feed: PodcastFeed,
+    store: object | None = None,
 ) -> 'PCTrack':
-    """Convert a downloaded episode into a PCTrack for the sync pipeline.
+    """Convert a podcast episode into a PCTrack for the sync pipeline.
+
+    Works for both downloaded and not-yet-downloaded episodes.  For
+    episodes without a local file, RSS metadata is used and the file
+    will be downloaded during sync execution.
 
     The returned PCTrack is fully compatible with SyncExecutor's
     ``_pc_track_to_info()`` — which detects ``is_podcast=True`` and sets
     media_type=PODCAST, podcast_flag, skip_when_shuffling, etc.
 
     Args:
-        episode: Episode with a valid downloaded_path.
+        episode: Episode (may or may not have a downloaded_path).
         feed: Parent feed (for show-level metadata).
+        store: Optional SubscriptionStore (for predicting download path).
 
     Returns:
         A PCTrack ready for use in a SyncItem.
     """
     from SyncEngine.pc_library import PCTrack
 
-    path = episode.downloaded_path
-    source = Path(path)
-    ext = source.suffix.lower()
+    path = episode.downloaded_path or ""
+    has_file = bool(path and os.path.exists(path))
+
+    # If not downloaded, predict the download path from the audio URL
+    if not has_file and episode.audio_url:
+        if store is not None:
+            from PodcastManager.subscription_store import SubscriptionStore
+            if isinstance(store, SubscriptionStore):
+                dest_dir = store.feed_dir(feed)
+                from .downloader import _safe_filename
+                path = os.path.join(dest_dir, _safe_filename(episode))
+
+    # Derive extension from path or audio URL
+    if path:
+        ext = Path(path).suffix.lower()
+    elif episode.audio_url:
+        url_path = episode.audio_url.split("?")[0]
+        ext = Path(url_path).suffix.lower()
+        if ext not in (".mp3", ".m4a", ".m4b", ".aac", ".ogg", ".opus",
+                        ".flac", ".wav", ".wma"):
+            ext = ".mp3"  # safe default
+    else:
+        ext = ".mp3"
 
     # Read real audio metadata from the downloaded file
     bitrate: Optional[int] = None
@@ -57,7 +158,7 @@ def episode_to_pc_track(
     duration_ms = episode.duration_seconds * 1000
     vbr = False
 
-    if path and os.path.exists(path):
+    if has_file:
         try:
             from mutagen import File as MutagenFile  # type: ignore[import-untyped]
             audio = MutagenFile(path)
@@ -74,26 +175,31 @@ def episode_to_pc_track(
         except Exception as exc:
             log.debug("Could not read audio metadata for %s: %s", path, exc)
 
-    file_size = source.stat().st_size if source.exists() else episode.size_bytes
+    if has_file:
+        file_size = Path(path).stat().st_size
+    else:
+        file_size = episode.size_bytes
 
     # iPod-native formats
     native = {".mp3", ".m4a", ".m4b", ".aac", ".wav", ".aif", ".aiff"}
 
     # Extract chapter markers from the downloaded file
     chapters = None
-    if path and os.path.exists(path):
+    if has_file:
         try:
             from .downloader import extract_chapters
             chapters = extract_chapters(path)
         except Exception as exc:
             log.debug("Could not extract chapters from %s: %s", path, exc)
 
+    source = Path(path) if path else Path("pending_download" + ext)
+
     return PCTrack(
         path=path,
         relative_path=source.name,
         filename=source.name,
         extension=ext,
-        mtime=source.stat().st_mtime if source.exists() else 0.0,
+        mtime=source.stat().st_mtime if has_file else 0.0,
         size=file_size,
         title=episode.title or "Untitled Episode",
         artist=feed.author or feed.title,
@@ -128,15 +234,21 @@ def episode_to_pc_track(
 def build_podcast_sync_plan(
     episodes: list[tuple[PodcastEpisode, PodcastFeed]],
     ipod_tracks: list[dict],
+    store: object | None = None,
 ) -> 'SyncPlan':
     """Build a SyncPlan for podcast episodes to add to iPod.
 
     Filters out episodes already on iPod (matched by enclosure URL or
     title+album), and creates ADD_TO_IPOD SyncItems for the rest.
 
+    Works for both downloaded and not-yet-downloaded episodes.  For
+    pending episodes, the actual download happens during sync execution
+    (see ``SyncExecutor._download_podcast_episodes``).
+
     Args:
-        episodes: List of (episode, feed) tuples for downloaded episodes.
+        episodes: List of (episode, feed) tuples.
         ipod_tracks: Parsed track dicts from iTunesDBCache.get_tracks().
+        store: Optional SubscriptionStore (for predicting download paths).
 
     Returns:
         A SyncPlan ready for the SyncReview widget.
@@ -174,7 +286,7 @@ def build_podcast_sync_plan(
         if already_on_ipod:
             continue
 
-        pc_track = episode_to_pc_track(episode, feed)
+        pc_track = episode_to_pc_track(episode, feed, store)
         to_add.append(SyncItem(
             action=SyncAction.ADD_TO_IPOD,
             pc_track=pc_track,
@@ -197,47 +309,309 @@ def needs_transcode(episode: PodcastEpisode) -> bool:
     return ext not in native
 
 
-def match_ipod_tracks(
-    feed: PodcastFeed,
-    ipod_tracks: list[dict],
-) -> None:
-    """Match existing iPod tracks to feed episodes.
+# ── Age threshold helpers ─────────────────────────────────────────────────────
 
-    Scans the iPod's parsed track list for podcast tracks matching this
-    feed (by enclosure URL or title+album).  Updates episode.ipod_dbid
-    and episode.status for matched episodes.
+_AGE_THRESHOLDS: dict[str, int] = {
+    "1_day": 86400,
+    "3_days": 86400 * 3,
+    "1_week": 86400 * 7,
+    "2_weeks": 86400 * 14,
+    "1_month": 86400 * 30,
+    "2_months": 86400 * 60,
+    "3_months": 86400 * 90,
+}
+
+
+def _should_clear_episode(
+    ipod_track: dict,
+    feed: PodcastFeed,
+    now: float,
+) -> bool:
+    """Decide whether an on-iPod episode should be cleared from its slot.
+
+    Returns True if the episode matches any of the feed's clear criteria.
+    """
+    # Clear when listened: play_count > 0
+    if feed.clear_when_listened:
+        play_count = ipod_track.get("play_count_1", 0)
+        if play_count and play_count > 0:
+            return True
+
+    # Clear when older than threshold (by date added to iPod)
+    max_age = _AGE_THRESHOLDS.get(feed.clear_older_than)
+    if max_age is not None:
+        date_added = ipod_track.get("date_added", 0)
+        if date_added and (now - date_added) > max_age:
+            return True
+
+    return False
+
+
+def _pick_candidates(
+    feed: PodcastFeed,
+    on_ipod_guids: set[str],
+    count: int,
+) -> list[PodcastEpisode]:
+    """Pick episodes to fill empty slots based on fill_mode.
 
     Args:
-        feed: A PodcastFeed with episodes.
-        ipod_tracks: Parsed track dicts from iTunesDBCache.get_tracks().
+        feed: The feed with a full episode catalog (after RSS refresh).
+        on_ipod_guids: GUIDs of episodes staying on iPod (not cleared).
+        count: Number of slots to fill.
+
+    Returns:
+        List of episodes to add, up to *count*.
     """
+    if count <= 0:
+        return []
+
+    # Consider any episode not already on iPod (download happens at sync time)
+    available = [
+        ep for ep in feed.episodes
+        if ep.status != STATUS_ON_IPOD
+        and ep.guid not in on_ipod_guids
+        and ep.audio_url  # must have a download URL
+    ]
+
+    if not available:
+        return []
+
+    if feed.fill_mode == "next":
+        # "next" mode: pick the next unheard episodes after the latest
+        # one on the iPod.  Sort by pub_date ascending, then take from
+        # the episode after the newest on-iPod one.
+        available.sort(key=lambda e: e.pub_date)
+
+        # Find the pub_date of the newest episode currently on iPod
+        on_ipod_eps = [
+            ep for ep in feed.episodes
+            if ep.guid in on_ipod_guids
+        ]
+        if on_ipod_eps:
+            latest_on_ipod = max(ep.pub_date for ep in on_ipod_eps)
+            # Take episodes published after the newest on-iPod episode
+            after = [ep for ep in available if ep.pub_date > latest_on_ipod]
+            if after:
+                return after[:count]
+
+        # No on-iPod episodes or none newer: start from the oldest available
+        return available[:count]
+
+    # Default: "newest" — most recently published first
+    available.sort(key=lambda e: e.pub_date, reverse=True)
+    return available[:count]
+
+
+def build_podcast_managed_plan(
+    feeds: list[PodcastFeed],
+    ipod_tracks: list[dict],
+    store: object | None = None,
+) -> 'SyncPlan':
+    """Build a SyncPlan that applies per-feed podcast settings.
+
+    Evaluates each feed's slot management settings against the current
+    iPod state and produces add/remove actions:
+
+    1. **Clear phase** — identify on-iPod episodes that should be cleared
+       (listened, too old) based on feed settings.
+    2. **Fill phase** — fill empty slots with new episodes based on
+       ``fill_mode`` (newest or next).
+    3. **Clear method** — ``"remove"`` clears unconditionally;
+       ``"replace"`` only clears if a replacement episode is available.
+
+    Args:
+        feeds: All subscribed feeds (with full episode catalogs after
+               RSS refresh).
+        ipod_tracks: Parsed track dicts from iTunesDBCache.
+        store: Optional SubscriptionStore for saving state changes.
+
+    Returns:
+        A SyncPlan with adds and removes ready for the SyncReview.
+    """
+    from SyncEngine.fingerprint_diff_engine import (
+        SyncPlan, SyncItem, SyncAction, StorageSummary,
+    )
+
+    now = time.time()
+    to_add: list[SyncItem] = []
+    to_remove: list[SyncItem] = []
+    bytes_to_add = 0
+    bytes_to_remove = 0
+
+    # Index all podcast tracks on iPod by enclosure URL and title+album
+    podcast_tracks: list[dict] = []
     by_enclosure: dict[str, dict] = {}
     by_title_album: dict[tuple[str, str], dict] = {}
-
     for t in ipod_tracks:
-        media_type = t.get("media_type", 0)
-        if not (media_type & 0x04):
+        if not (t.get("media_type", 0) & 0x04):
             continue
-        enc_url = t.get("Podcast Enclosure URL", "")
-        if enc_url:
-            by_enclosure[enc_url] = t
+        podcast_tracks.append(t)
+        enc = t.get("Podcast Enclosure URL", "")
+        if enc:
+            by_enclosure[enc] = t
         title = t.get("Title", "")
         album = t.get("Album", "")
         if title and album:
             by_title_album[(title.lower(), album.lower())] = t
 
-    for ep in feed.episodes:
-        if ep.ipod_dbid:
-            continue
+    for feed in feeds:
+        # Find this feed's episodes currently on the iPod
+        on_ipod: list[tuple[PodcastEpisode, dict]] = []
+        for ep in feed.episodes:
+            if ep.status != STATUS_ON_IPOD or not ep.ipod_db_id:
+                continue
+            # Look up the iPod track dict for metadata (play count, date_added)
+            ipod_track = None
+            if ep.audio_url:
+                ipod_track = by_enclosure.get(ep.audio_url)
+            if not ipod_track and ep.title and feed.title:
+                ipod_track = by_title_album.get(
+                    (ep.title.lower(), feed.title.lower())
+                )
+            if ipod_track:
+                on_ipod.append((ep, ipod_track))
 
-        matched_track = None
-        if ep.audio_url:
-            matched_track = by_enclosure.get(ep.audio_url)
-        if not matched_track and ep.title and feed.title:
-            matched_track = by_title_album.get(
-                (ep.title.lower(), feed.title.lower())
+        # ── Clear phase: identify episodes to remove ──────────────────
+        to_clear: list[tuple[PodcastEpisode, dict]] = []
+        staying: list[tuple[PodcastEpisode, dict]] = []
+
+        for ep, track in on_ipod:
+            if _should_clear_episode(track, feed, now):
+                to_clear.append((ep, track))
+            else:
+                staying.append((ep, track))
+
+        staying_guids = {ep.guid for ep, _ in staying}
+
+        # ── Fill phase: pick episodes for empty slots ─────────────────
+        slots_after_clear = len(staying)
+        slots_to_fill = max(0, feed.episode_slots - slots_after_clear)
+        candidates = _pick_candidates(feed, staying_guids, slots_to_fill)
+
+        # ── Apply clear method ────────────────────────────────────────
+        # "remove"  → remove cleared episodes unconditionally
+        # "replace" → only remove if we have a replacement to add
+        feed_removes: list[SyncItem] = []
+        feed_adds: list[SyncItem] = []
+
+        if feed.clear_method == "replace":
+            # Pair each cleared episode with a candidate replacement.
+            # Only remove if there's something to replace it with.
+            paired = min(len(to_clear), len(candidates))
+            for i in range(paired):
+                ep, track = to_clear[i]
+                feed_removes.append(SyncItem(
+                    action=SyncAction.REMOVE_FROM_IPOD,
+                    db_id=ep.ipod_db_id,
+                    ipod_track=track,
+                    description=(
+                        f"\U0001f399 {feed.title} \u2014 {ep.title} "
+                        f"(replaced)"
+                    ),
+                ))
+            # Add only as many candidates as we have room for
+            # (paired replacements + any remaining empty slots)
+            remaining_slots = slots_to_fill - paired
+            add_count = paired + max(0, remaining_slots)
+            for candidate in candidates[:add_count]:
+                pc_track = episode_to_pc_track(candidate, feed, store)
+                feed_adds.append(SyncItem(
+                    action=SyncAction.ADD_TO_IPOD,
+                    pc_track=pc_track,
+                    description=(
+                        f"\U0001f399 {feed.title} \u2014 {candidate.title}"
+                    ),
+                ))
+        else:
+            # "remove" — clear unconditionally, then fill all empty slots
+            for ep, track in to_clear:
+                feed_removes.append(SyncItem(
+                    action=SyncAction.REMOVE_FROM_IPOD,
+                    db_id=ep.ipod_db_id,
+                    ipod_track=track,
+                    description=(
+                        f"\U0001f399 {feed.title} \u2014 {ep.title} "
+                        f"(cleared)"
+                    ),
+                ))
+
+            # Recalculate available slots after removals
+            total_after = len(staying)
+            fill_count = max(0, feed.episode_slots - total_after)
+            for candidate in candidates[:fill_count]:
+                pc_track = episode_to_pc_track(candidate, feed, store)
+                feed_adds.append(SyncItem(
+                    action=SyncAction.ADD_TO_IPOD,
+                    pc_track=pc_track,
+                    description=(
+                        f"\U0001f399 {feed.title} \u2014 {candidate.title}"
+                    ),
+                ))
+
+        # Also cap total on-iPod count to episode_slots even if nothing
+        # was cleared (e.g. user reduced slot count after initial sync).
+        # Remove oldest-added episodes that exceed the slot limit.
+        total_staying = len(staying) + len(feed_adds) - len(feed_removes)
+        if total_staying > feed.episode_slots:
+            overflow = total_staying - feed.episode_slots
+            # Sort staying by date_added ascending (oldest first) to trim
+            staying_sorted = sorted(
+                staying, key=lambda x: x[1].get("date_added", 0),
+            )
+            for ep, track in staying_sorted[:overflow]:
+                feed_removes.append(SyncItem(
+                    action=SyncAction.REMOVE_FROM_IPOD,
+                    db_id=ep.ipod_db_id,
+                    ipod_track=track,
+                    description=(
+                        f"\U0001f399 {feed.title} \u2014 {ep.title} "
+                        f"(over slot limit)"
+                    ),
+                ))
+
+        to_remove.extend(feed_removes)
+        to_add.extend(feed_adds)
+        bytes_to_remove += sum(
+            item.ipod_track.get("size", 0)
+            for item in feed_removes if item.ipod_track
+        )
+        bytes_to_add += sum(
+            item.pc_track.size for item in feed_adds if item.pc_track
+        )
+
+        if feed_removes or feed_adds:
+            log.info(
+                "Podcast %s: %d to remove, %d to add (slots=%d, on_ipod=%d)",
+                feed.title, len(feed_removes), len(feed_adds),
+                feed.episode_slots, len(on_ipod),
             )
 
-        if matched_track:
-            ep.ipod_dbid = matched_track.get("dbid", 0)
-            ep.status = STATUS_ON_IPOD
+    return SyncPlan(
+        to_add=to_add,
+        to_remove=to_remove,
+        storage=StorageSummary(
+            bytes_to_add=bytes_to_add,
+            bytes_to_remove=bytes_to_remove,
+        ),
+    )
+
+
+def match_ipod_tracks(
+    feed: PodcastFeed,
+    ipod_tracks: list[dict],
+) -> bool:
+    """Match existing iPod tracks to feed episodes.
+
+    Scans the iPod's parsed track list for podcast tracks matching this
+    feed (by enclosure URL or title+album).  Updates episode.ipod_db_id
+    and episode.status for matched episodes.
+
+    Args:
+        feed: A PodcastFeed with episodes.
+        ipod_tracks: Parsed track dicts from iTunesDBCache.get_tracks().
+
+    Returns:
+        True if any episode state changed, otherwise False.
+    """
+    matcher = PodcastTrackMatcher(ipod_tracks)
+    return matcher.match_feed(feed)

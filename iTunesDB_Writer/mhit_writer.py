@@ -38,7 +38,7 @@ from iTunesDB_Shared.mhit_defs import MHIT_HEADER_SIZE
 from .mhod_writer import write_track_mhods
 
 
-def generate_dbid() -> int:
+def generate_db_id() -> int:
     """Generate a random 64-bit database ID for a track."""
     return random.getrandbits(64)
 
@@ -115,7 +115,7 @@ class TrackInfo:
 
     # iPod-specific
     track_id: int = 0  # Will be assigned during write
-    dbid: int = 0  # Will be generated if 0
+    db_id: int = 0  # Will be generated if 0
     media_type: int = MEDIA_TYPE_AUDIO
     season_number: int = 0  # 0xD4: TV show season number
     episode_number: int = 0  # 0xD8: TV show episode number
@@ -238,21 +238,21 @@ def _gapless_or_zero(value: int, capabilities) -> int:
     return value
 
 
-def write_mhit(track: TrackInfo, track_id: int, id_0x24: int = 0,
+def write_mhit(track: TrackInfo, track_id: int, db_id_2: int = 0,
                capabilities=None) -> bytes:
     """Write a complete MHIT chunk with all child MHODs.
 
     Args:
         track: TrackInfo dataclass with all track metadata.
         track_id: Unique track ID within this database.
-        id_0x24: Database-wide ID from MHBD offset 0x24 (written into every track).
+        db_id_2: Database-wide ID from MHBD offset 0x24 (written into every track).
         capabilities: Optional DeviceCapabilities for gapless/video filtering.
 
     Returns:
         Complete MHIT chunk bytes (header + MHODs).
     """
-    if track.dbid == 0:
-        track.dbid = generate_dbid()
+    if track.db_id == 0:
+        track.db_id = generate_db_id()
     if track.date_added == 0:
         track.date_added = int(time.time())
 
@@ -312,7 +312,7 @@ def write_mhit(track: TrackInfo, track_id: int, id_0x24: int = 0,
         'user_id': track.user_id,
         'date_added': track.date_added,
         'bookmark_time': track.bookmark_time,
-        'db_id': track.dbid,
+        'db_id': track.db_id,
         'checked_flag': track.checked,
         'app_rating': track.app_rating,
         'bpm': track.bpm,
@@ -331,7 +331,7 @@ def write_mhit(track: TrackInfo, track_id: int, id_0x24: int = 0,
         'skip_when_shuffling': 1 if track.skip_when_shuffling else 0,
         'remember_position': 1 if track.remember_position else 0,
         'use_podcast_now_playing_flag': track.podcast_flag,
-        'db_id_2': track.dbid,
+        'db_id_2': track.db_id,
         'lyrics_flag': 1 if has_lyrics else 0,
         'movie_flag': _resolve_movie_flag(track, media_type),
         'not_played_flag': _resolve_not_played(track),
@@ -352,7 +352,7 @@ def write_mhit(track: TrackInfo, track_id: int, id_0x24: int = 0,
         'gapless_track_flag': _gapless_or_zero(track.gapless_track_flag, capabilities),
         'gapless_album_flag': _gapless_or_zero(track.gapless_album_flag, capabilities),
         'album_id': track.album_id,
-        'mhbd_id_ref': id_0x24,
+        'mhbd_id_ref': db_id_2,
         'size_2': track.size,
         'sort_mhod_indicators': _compute_sort_indicators(track),
         'artwork_id_ref': track.mhii_link,

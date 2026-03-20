@@ -315,7 +315,8 @@ def _read_qt_chapters_ffprobe(file_path: str) -> list[dict] | None:
         proc = subprocess.run(
             [ffprobe_bin, "-v", "quiet", "-print_format", "json",
              "-show_chapters", file_path],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=10,
             **_sp_kwargs,
         )
         if proc.returncode != 0:

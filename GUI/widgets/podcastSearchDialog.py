@@ -19,7 +19,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -33,7 +32,7 @@ from ..styles import (
     accent_btn_css,
     btn_css,
     make_label,
-    scrollbar_css,
+    make_scroll_area,
     LABEL_SECONDARY,
 )
 from ..glyphs import glyph_pixmap
@@ -117,18 +116,13 @@ class PodcastSearchDialog(QDialog):
         self._results_layout.setSpacing((4))
         self._results_layout.addStretch()
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self._results_container)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(f"""
+        scroll = make_scroll_area(extra_css=f"""
             QScrollArea {{
-                background: transparent;
                 border: 1px solid {Colors.BORDER_SUBTLE};
                 border-radius: {Metrics.BORDER_RADIUS_SM}px;
             }}
-            {scrollbar_css()}
         """)
+        scroll.setWidget(self._results_container)
         layout.addWidget(scroll, stretch=1)
 
         # ── Manual RSS row ───────────────────────────────────────────────

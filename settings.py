@@ -1,10 +1,23 @@
 """
 Application settings with JSON persistence.
 
-Settings are stored in the user's app data directory:
+Settings are stored in the platform-appropriate directory:
   Windows: %APPDATA%/iOpenPod/settings.json
   macOS:   ~/Library/Application Support/iOpenPod/settings.json
-  Linux:   ~/.config/iOpenPod/settings.json
+  Linux:   $XDG_CONFIG_HOME/iOpenPod/settings.json  (~/.config/iOpenPod/)
+
+User data (logs, backups) follows the same convention:
+  Windows: ~/iOpenPod/
+  macOS:   ~/Library/Application Support/iOpenPod/
+  Linux:   $XDG_DATA_HOME/iOpenPod/  (~/.local/share/iOpenPod/)
+
+Cache data (transcoded files):
+  Windows: ~/iOpenPod/cache/
+  macOS:   ~/Library/Caches/iOpenPod/
+  Linux:   $XDG_CACHE_HOME/iOpenPod/  (~/.cache/iOpenPod/)
+
+On Unix, if the legacy ~/iOpenPod directory exists it is used instead
+so existing installs keep working.
 
 The default location always acts as a bootstrap: if it contains a
 ``settings_dir`` override, the real settings are loaded/saved from
@@ -26,12 +39,63 @@ def get_version() -> str:
     try:
         return _pkg_version("iopenpod")
     except Exception:
-        return "1.0.0"
+        return "1.0.30"
 
 
 def _default_data_dir() -> str:
-    """Base directory for all iOpenPod user data: ~/iOpenPod."""
-    return os.path.join(os.path.expanduser("~"), "iOpenPod")
+    """Base directory for iOpenPod user data (logs, backups).
+
+    On Linux, follows XDG Base Directory Specification:
+        $XDG_DATA_HOME/iOpenPod  (default: ~/.local/share/iOpenPod)
+    On Windows: ~/iOpenPod
+    On macOS:   ~/Library/Application Support/iOpenPod
+
+    If the legacy ~/iOpenPod directory exists on a Unix system it is used
+    instead, so existing installs keep working until the user moves it.
+    """
+    home = os.path.expanduser("~")
+    legacy = os.path.join(home, "iOpenPod")
+
+    if sys.platform == "win32":
+        return legacy
+    elif sys.platform == "darwin":
+        xdg = os.path.join(home, "Library", "Application Support", "iOpenPod")
+        return legacy if os.path.isdir(legacy) else xdg
+    else:
+        # Linux / other Unix — XDG_DATA_HOME
+        if os.path.isdir(legacy):
+            return legacy
+        base = os.environ.get(
+            "XDG_DATA_HOME", os.path.join(home, ".local", "share"),
+        )
+        return os.path.join(base, "iOpenPod")
+
+
+def _default_cache_dir() -> str:
+    """Base directory for iOpenPod cache data (transcode cache).
+
+    On Linux: $XDG_CACHE_HOME/iOpenPod  (default: ~/.cache/iOpenPod)
+    On Windows: ~/iOpenPod/cache
+    On macOS:   ~/Library/Caches/iOpenPod
+
+    If the legacy ~/iOpenPod/cache directory exists on a Unix system it
+    is used instead.
+    """
+    home = os.path.expanduser("~")
+    legacy = os.path.join(home, "iOpenPod", "cache")
+
+    if sys.platform == "win32":
+        return legacy
+    elif sys.platform == "darwin":
+        xdg = os.path.join(home, "Library", "Caches", "iOpenPod")
+        return legacy if os.path.isdir(legacy) else xdg
+    else:
+        if os.path.isdir(legacy):
+            return legacy
+        base = os.environ.get(
+            "XDG_CACHE_HOME", os.path.join(home, ".cache"),
+        )
+        return os.path.join(base, "iOpenPod")
 
 
 def _default_settings_dir() -> str:
@@ -64,7 +128,7 @@ def _get_settings_dir() -> str:
             if custom and os.path.isdir(custom) and custom != default_dir:
                 # Verify the custom location actually has (or can have) a settings file
                 return custom
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             pass
 
     return default_dir
@@ -83,14 +147,19 @@ class AppSettings:
     # Changing this moves settings storage to the new location.
     settings_dir: str = ""
 
-    # Custom transcode cache directory (empty = ~/iOpenPod/cache).
+    # Custom transcode cache directory (empty = platform default via _default_cache_dir).
     transcode_cache_dir: str = ""
 
-    # Custom log directory (empty = ~/iOpenPod/logs). Covers both app logs
-    # and crash reports.
+    # Maximum transcode cache size in gigabytes.  0.0 = unlimited.
+    # When a new file would push the cache over this limit, the least-recently-
+    # used entries are evicted first.
+    max_cache_size_gb: float = 5.0
+
+    # Custom log directory (empty = platform default via _default_data_dir/logs).
+    # Covers both app logs and crash reports.
     log_dir: str = ""
 
-    # Custom backup directory (empty = ~/iOpenPod/backups).
+    # Custom backup directory (empty = platform default via _default_data_dir/backups).
     backup_dir: str = ""
 
     # ── Sync ────────────────────────────────────────────────────────────────
@@ -140,6 +209,24 @@ class AppSettings:
     # 0 = auto (CPU count), 1 = sequential (legacy behaviour).
     sync_workers: int = 0
 
+    # Always resample audio output to 44.1 kHz (CD rate).
+    # Default False preserves the source sample rate (capped at 48 kHz).
+    # Enable for maximum compatibility with early iPod models that can have
+    # quirks with 48 kHz PCM inside ALAC, and to shrink high-res (96 kHz)
+    # FLAC transcodes.
+    normalize_sample_rate: bool = False
+
+    # When AAC quality is "spoken" (64 kbps), downmix stereo to mono.
+    # Stereo at 64 kbps = ~32 kbps per channel.  Mono at 64 kbps sounds
+    # significantly better and cuts file size by ~50%.
+    # Only affects spoken-word transcodes; music tracks are unchanged.
+    mono_for_spoken: bool = True
+
+    # Automatically use "spoken" AAC quality for files whose media type
+    # is Podcast, Audiobook, or iTunes U (stik atom values 1, 2, 21).
+    # Music files always use the configured aac_quality preset.
+    smart_quality_by_type: bool = True
+
     # ── Library ─────────────────────────────────────────────────────────────
     # Last selected iPod device path (remembered between sessions)
     last_device_path: str = ""
@@ -177,15 +264,6 @@ class AppSettings:
 
     # Maximum number of backup snapshots to retain per device (0 = unlimited).
     max_backups: int = 10
-
-    # ── Podcasts ────────────────────────────────────────────────────────────
-    # Default number of latest episodes to auto-sync per subscribed feed.
-    # 0 = manual only (user selects episodes individually).
-    podcast_auto_sync_count: int = 0
-
-    # Maximum downloaded episodes to keep per feed (0 = unlimited).
-    # Oldest episodes beyond this limit are deleted on refresh.
-    podcast_max_downloaded: int = 0
 
     def save(self) -> None:
         """Write settings to the active settings directory.
@@ -256,7 +334,7 @@ class AppSettings:
                         256: "normal", 320: "high"}
                 settings.aac_quality = _map.get(_br, "normal")
 
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             pass
         return settings
 

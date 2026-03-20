@@ -232,7 +232,8 @@ def _build_macos_usb_cache() -> None:
         proc = subprocess.run(
             ["ioreg", "-r", "-c", "IOUSBHostDevice", "-n", "iPod",
              "-l", "-d", "20", "-w", "0"],
-            capture_output=True, text=True, timeout=8,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=8,
         )
         if proc.returncode == 0 and proc.stdout:
             current_serial: str = ""
@@ -407,7 +408,8 @@ def _linux_find_block_device(mount_path: str) -> str | None:
     try:
         cp = subprocess.run(
             ["findmnt", "-n", "-o", "SOURCE", "--target", mount_path],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=5,
         )
         if cp.returncode == 0:
             dev = cp.stdout.strip().split("\n")[0].strip()
@@ -445,7 +447,8 @@ def _linux_find_block_device(mount_path: str) -> str | None:
         import json as _json
         cp = subprocess.run(
             ["lsblk", "-J", "-o", "NAME,MOUNTPOINT"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=5,
         )
         if cp.returncode == 0:
             data = _json.loads(cp.stdout)
@@ -474,7 +477,8 @@ def _linux_usb_info_from_udevadm(device: str) -> dict:
     try:
         cp = subprocess.run(
             ["udevadm", "info", "--query=property", "--name", device],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=5,
         )
         if cp.returncode != 0:
             return result
@@ -667,7 +671,8 @@ def _identify_via_usb_for_drive(drive_letter: str) -> Optional[dict]:
         )
         wmi_result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=10,
             **_SP_KWARGS,
         )
         pnp_id = ""

@@ -142,8 +142,8 @@ def format_rating(stars_x20: int) -> str:
     return "★" * stars + "☆" * (5 - stars)
 
 
-def format_dbid(val: int) -> str:
-    """Format 64-bit dbid as hex."""
+def format_db_id(val: int) -> str:
+    """Format 64-bit db_id as hex."""
     if not val:
         return ""
     return f"0x{val:016X}"
@@ -244,7 +244,7 @@ COLUMN_CONFIG: dict[str, tuple[str, Callable[[int], str] | None]] = {
     "artwork_id_ref": ("Artwork Ref", None),
     # ── Identifiers (diagnostic) ──
     "track_id": ("Track ID", None),
-    "db_id": ("DBID", format_dbid),
+    "db_id": ("db_id", format_db_id),
     "album_id": ("Album ID", None),
     "artist_id_ref": ("Artist Ref", None),
     "composer_id": ("Composer ID", None),
@@ -426,6 +426,8 @@ class MusicBrowserList(QFrame):
         self._status_label.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
         self._status_label.setStyleSheet(
             f"color: {Colors.TEXT_SECONDARY}; padding: 3px 8px;"
+            f" border-top: 1px solid {Colors.BORDER_SUBTLE};"
+            " background: transparent;"
         )
         self._layout.addWidget(self._status_label)
 
@@ -647,7 +649,7 @@ class MusicBrowserList(QFrame):
         self._setup_columns()
         self._populate_table()
 
-    def clearTable(self) -> None:
+    def clearTable(self, clear_cache: bool = False) -> None:
         """Clear the table completely, cancelling any pending population."""
         self._cancel_population()
         self._all_tracks = []
@@ -656,7 +658,8 @@ class MusicBrowserList(QFrame):
         self._media_type_filter = None
         self._is_playlist_mode = False
         self._current_playlist = None
-        self._art_cache.clear()
+        if clear_cache:
+            self._art_cache.clear()
         self._art_pending.clear()
 
         try:
@@ -869,7 +872,8 @@ class MusicBrowserList(QFrame):
 
             # Request artwork load for this track's artwork_id_ref
             mhii_link = track.get("artwork_id_ref")
-            if mhii_link is not None:
+            if mhii_link:  # Truthy check ignores 0 and None
+                mhii_link = int(mhii_link)
                 if mhii_link in self._art_cache:
                     art_item.setIcon(QIcon(self._art_cache[mhii_link]))
                 else:
@@ -993,8 +997,13 @@ class MusicBrowserList(QFrame):
             if item is None:
                 continue
             link = item.data(Qt.ItemDataRole.UserRole)
-            if link is not None and link not in self._art_cache and link not in self._art_pending:
-                links_to_load.add(link)
+            if link:
+                try:
+                    link = int(link)
+                except (ValueError, TypeError):
+                    continue
+                if link not in self._art_cache and link not in self._art_pending:
+                    links_to_load.add(link)
 
         if not links_to_load:
             return
@@ -1002,11 +1011,19 @@ class MusicBrowserList(QFrame):
         self._art_pending |= links_to_load
         load_id = self._load_id
 
-        # Load in a single background worker
-        worker = Worker(self._load_art_batch, list(links_to_load))
-        worker.signals.result.connect(
-            lambda result, lid=load_id: self._on_art_loaded(result, lid))
-        ThreadPoolSingleton.get_instance().start(worker)
+        # Load in smaller background batches so UI updates incrementally
+        links_list = list(links_to_load)
+        chunk_size = 20
+        pool = ThreadPoolSingleton.get_instance()
+
+        for i in range(0, len(links_list), chunk_size):
+            chunk = links_list[i:i + chunk_size]
+            worker = Worker(self._load_art_batch, chunk)
+            # Use default arguments correctly to capture the current load_id
+            worker.signals.result.connect(
+                lambda result, lid=load_id: self._on_art_loaded(result, lid)
+            )
+            pool.start(worker)
 
     def _load_art_batch(self, links: list[int]) -> dict[int, tuple[int, int, bytes] | None]:
         """Background worker: decode artwork for a batch of mhiiLinks.
@@ -1014,7 +1031,7 @@ class MusicBrowserList(QFrame):
         Returns dict mapping mhiiLink -> (width, height, rgba_bytes) or None.
         """
         from ..app import DeviceManager
-        from ..imgMaker import find_image_by_imgId, get_artworkdb_cached
+        from ..imgMaker import find_image_by_img_id, get_artworkdb_cached
         import os
 
         device = DeviceManager.get_instance()
@@ -1026,13 +1043,13 @@ class MusicBrowserList(QFrame):
         if not artworkdb_path or not os.path.exists(artworkdb_path):
             return {}
 
-        artworkdb_data, imgid_index = get_artworkdb_cached(artworkdb_path)
+        artworkdb_data, img_id_index = get_artworkdb_cached(artworkdb_path)
         results: dict[int, tuple[int, int, bytes] | None] = {}
 
         for link in links:
             if device.cancellation_token.is_cancelled():
                 break
-            result = find_image_by_imgId(artworkdb_data, artwork_folder, link, imgid_index)
+            result = find_image_by_img_id(artworkdb_data, artwork_folder, link, img_id_index)
             if result is not None:
                 pil_img, _dcol, _album_colors = result
                 pil_img = pil_img.convert("RGBA")
@@ -1044,7 +1061,10 @@ class MusicBrowserList(QFrame):
 
     def _on_art_loaded(self, results: dict | None, load_id: int) -> None:
         """Main-thread callback: apply loaded artwork to table rows."""
-        if results is None or self._load_id != load_id:
+        if results is None:
+            return
+
+        if self._load_id != load_id:
             return
 
         try:
@@ -1071,9 +1091,18 @@ class MusicBrowserList(QFrame):
                 if item is None:
                     continue
                 link = item.data(Qt.ItemDataRole.UserRole)
-                if link is not None and link in self._art_cache:
-                    item.setIcon(QIcon(self._art_cache[link]))
-                    item.setData(Qt.ItemDataRole.UserRole, None)  # Clear pending marker
+                if link:
+                    try:
+                        link = int(link)
+                    except (ValueError, TypeError):
+                        continue
+                    if link in self._art_cache:
+                        item.setIcon(QIcon(self._art_cache[link]))
+                        # Optional: Force the table to repaint this row to ensure it shows up immediately
+                        vp = self.table.viewport()
+                        if vp:
+                            vp.update()
+                        item.setData(Qt.ItemDataRole.UserRole, None)  # Clear pending marker
 
         except RuntimeError:
             pass  # Widget deleted

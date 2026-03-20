@@ -44,17 +44,31 @@ else:
         ' "Ubuntu", "DejaVu Sans"'
     )
 
-# ── Color palette ────────────────────────────────────────────────────────────
-
-
 # ── Theme palettes ───────────────────────────────────────────────────────────
 # Each palette is a dict mapping attribute name → color string.
 # Colors.apply_theme() copies the selected palette onto class attributes.
+#
+# Token semantics (applies to all palettes):
+#   BG_DARK / BG_MID       — window background gradient stops
+#   SURFACE                — subtle card/panel tint (semi-transparent)
+#   SURFACE_ALT            — input field backgrounds; inset areas
+#   SURFACE_RAISED         — raised elements: buttons, chips
+#   SURFACE_HOVER          — hover state for interactive surfaces
+#   SURFACE_ACTIVE         — pressed / active state
+#   TEXT_PRIMARY/SECONDARY/TERTIARY/DISABLED — text hierarchy
+#   BORDER / BORDER_SUBTLE — dividers, outlines; BORDER_SUBTLE is hairlines
+#   BORDER_FOCUS           — focus rings on inputs
+#   SELECTION              — row/item highlight background
+#   SYNC_FREED             — "freed storage" teal in the storage bar legend
 
+# ── Built-in dark ────────────────────────────────────────────────────────────
 _DARK_PALETTE = dict(
     ACCENT="#409cff", ACCENT_LIGHT="#60b0ff",
     ACCENT_DIM="rgba(64,156,255,80)", ACCENT_HOVER="rgba(64,156,255,120)",
     ACCENT_PRESS="rgba(64,156,255,60)", ACCENT_BORDER="rgba(64,156,255,100)",
+    ACCENT_MUTED="rgba(64,156,255,35)",
+    ACCENT_SOLID="rgba(64,156,255,200)", ACCENT_SOLID_PRESS="rgba(64,156,255,160)",
+    ACCENT_DARK="rgba(40,100,200,100)", ACCENT_DARK_DIM="rgba(40,100,180,60)",
     BG_DARK="#1a1a2e", BG_MID="#1e1e32",
     SURFACE="rgba(255,255,255,8)", SURFACE_ALT="rgba(255,255,255,12)",
     SURFACE_RAISED="rgba(255,255,255,18)", SURFACE_HOVER="rgba(255,255,255,25)",
@@ -67,28 +81,27 @@ _DARK_PALETTE = dict(
     DIALOG_BG="#222233", TOOLTIP_BG="#2a2d3a", DROPDOWN_BG="#2a2d3a",
     GRIDLINE="rgba(255,255,255,12)", SELECTION="rgba(64,156,255,90)",
     STAR="#ffc857",
-    DANGER="#ff6b6b", DANGER_DIM="rgba(255,100,100,30)",
-    DANGER_HOVER="rgba(255,100,100,50)",
-    SUCCESS="#51cf66", SUCCESS_DIM="rgba(80,180,80,40)",
-    SUCCESS_HOVER="rgba(80,180,80,60)",
+    DANGER="#ff6b6b", DANGER_DIM="rgba(255,100,100,30)", DANGER_HOVER="rgba(255,100,100,50)",
+    DANGER_BORDER="rgba(220,60,60,80)",
+    SUCCESS="#51cf66", SUCCESS_DIM="rgba(80,180,80,40)", SUCCESS_HOVER="rgba(80,180,80,60)",
+    SUCCESS_BORDER="rgba(80,180,80,80)",
     WARNING="#fcc419", INFO="#74c0fc",
     OVERLAY="rgba(30,30,38,220)",
-    SHADOW_LIGHT="rgba(0,0,0,25)", SHADOW="rgba(0,0,0,40)",
-    SHADOW_DEEP="rgba(0,0,0,60)",
+    SHADOW_LIGHT="rgba(0,0,0,25)", SHADOW="rgba(0,0,0,40)", SHADOW_DEEP="rgba(0,0,0,60)",
     TEXT_ON_ACCENT="#ffffff",
-    ACCENT_MUTED="rgba(64,156,255,35)",
-    ACCENT_SOLID="rgba(64,156,255,200)",
-    ACCENT_SOLID_PRESS="rgba(64,156,255,160)",
-    ACCENT_DARK="rgba(40,100,200,100)", ACCENT_DARK_DIM="rgba(40,100,180,60)",
-    DANGER_BORDER="rgba(220,60,60,80)", SUCCESS_BORDER="rgba(80,180,80,80)",
     SYNC_CYAN="#66d9e8", SYNC_PURPLE="#b197fc",
     SYNC_MAGENTA="#f06595", SYNC_ORANGE="#ff922b",
+    SYNC_FREED="#66d9c2",
 )
 
+# ── Built-in light ───────────────────────────────────────────────────────────
 _LIGHT_PALETTE = dict(
     ACCENT="#0a6fdb", ACCENT_LIGHT="#3d8de5",
     ACCENT_DIM="rgba(10,111,219,60)", ACCENT_HOVER="rgba(10,111,219,100)",
     ACCENT_PRESS="rgba(10,111,219,45)", ACCENT_BORDER="rgba(10,111,219,80)",
+    ACCENT_MUTED="rgba(10,111,219,18)",
+    ACCENT_SOLID="rgba(10,111,219,180)", ACCENT_SOLID_PRESS="rgba(10,111,219,140)",
+    ACCENT_DARK="rgba(10,80,160,80)", ACCENT_DARK_DIM="rgba(10,80,160,40)",
     BG_DARK="#f0f0f5", BG_MID="#e8e8f0",
     SURFACE="rgba(0,0,0,8)", SURFACE_ALT="rgba(0,0,0,14)",
     SURFACE_RAISED="rgba(0,0,0,20)", SURFACE_HOVER="rgba(0,0,0,26)",
@@ -101,25 +114,20 @@ _LIGHT_PALETTE = dict(
     DIALOG_BG="#ffffff", TOOLTIP_BG="#f5f5fa", DROPDOWN_BG="#ffffff",
     GRIDLINE="rgba(0,0,0,12)", SELECTION="rgba(10,111,219,70)",
     STAR="#e6a800",
-    DANGER="#d9363e", DANGER_DIM="rgba(217,54,62,20)",
-    DANGER_HOVER="rgba(217,54,62,35)",
-    SUCCESS="#2b8a3e", SUCCESS_DIM="rgba(43,138,62,25)",
-    SUCCESS_HOVER="rgba(43,138,62,40)",
+    DANGER="#d9363e", DANGER_DIM="rgba(217,54,62,20)", DANGER_HOVER="rgba(217,54,62,35)",
+    DANGER_BORDER="rgba(217,54,62,60)",
+    SUCCESS="#2b8a3e", SUCCESS_DIM="rgba(43,138,62,25)", SUCCESS_HOVER="rgba(43,138,62,40)",
+    SUCCESS_BORDER="rgba(43,138,62,60)",
     WARNING="#e07700", INFO="#1c7ed6",
     OVERLAY="rgba(240,240,245,230)",
-    SHADOW_LIGHT="rgba(0,0,0,14)", SHADOW="rgba(0,0,0,22)",
-    SHADOW_DEEP="rgba(0,0,0,32)",
+    SHADOW_LIGHT="rgba(0,0,0,14)", SHADOW="rgba(0,0,0,22)", SHADOW_DEEP="rgba(0,0,0,32)",
     TEXT_ON_ACCENT="#ffffff",
-    ACCENT_MUTED="rgba(10,111,219,18)",
-    ACCENT_SOLID="rgba(10,111,219,180)",
-    ACCENT_SOLID_PRESS="rgba(10,111,219,140)",
-    ACCENT_DARK="rgba(10,80,160,80)", ACCENT_DARK_DIM="rgba(10,80,160,40)",
-    DANGER_BORDER="rgba(217,54,62,60)", SUCCESS_BORDER="rgba(43,138,62,60)",
     SYNC_CYAN="#0c8599", SYNC_PURPLE="#7048e8",
     SYNC_MAGENTA="#c2255c", SYNC_ORANGE="#d9480f",
+    SYNC_FREED="#09a389",
 )
 
-# High-contrast overlays: merged on top of dark or light palette
+# ── High-contrast overlays: merged on top of dark or light palette ───────────
 _HC_DARK_OVERRIDES = dict(
     TEXT_PRIMARY="rgba(255,255,255,255)", TEXT_SECONDARY="rgba(255,255,255,200)",
     TEXT_TERTIARY="rgba(255,255,255,160)", TEXT_DISABLED="rgba(255,255,255,100)",
@@ -139,6 +147,209 @@ _HC_LIGHT_OVERRIDES = dict(
     DANGER="#a91e25", SUCCESS="#1a6b2d", WARNING="#b85c00", INFO="#1062b0",
     DANGER_BORDER="rgba(169,30,37,110)", SUCCESS_BORDER="rgba(26,107,45,110)",
 )
+
+# ── Catppuccin Mocha (darkest) ────────────────────────────────────────────────
+# https://catppuccin.com/palette — Mocha flavor
+_CATPPUCCIN_MOCHA = dict(
+    ACCENT="#89b4fa", ACCENT_LIGHT="#b4befe",          # Blue / Lavender
+    ACCENT_DIM="rgba(137,180,250,70)", ACCENT_HOVER="rgba(137,180,250,110)",
+    ACCENT_PRESS="rgba(137,180,250,55)", ACCENT_BORDER="rgba(137,180,250,90)",
+    ACCENT_MUTED="rgba(137,180,250,25)",
+    ACCENT_SOLID="rgba(137,180,250,200)", ACCENT_SOLID_PRESS="rgba(137,180,250,160)",
+    ACCENT_DARK="rgba(80,120,200,90)", ACCENT_DARK_DIM="rgba(80,120,200,55)",
+    BG_DARK="#1e1e2e", BG_MID="#181825",               # Base / Mantle
+    SURFACE="rgba(49,50,68,60)",                        # Surface0 tinted
+    SURFACE_ALT="#313244",                              # Surface0
+    SURFACE_RAISED="#45475a",                           # Surface1
+    SURFACE_HOVER="#585b70",                            # Surface2
+    SURFACE_ACTIVE="rgba(88,91,112,220)",               # Surface2 opaque
+    MENU_BG="#313244",
+    TEXT_PRIMARY="#cdd6f4",                             # Text
+    TEXT_SECONDARY="#bac2de",                           # Subtext1
+    TEXT_TERTIARY="#a6adc8",                            # Subtext0
+    TEXT_DISABLED="#6c7086",                            # Overlay0
+    BORDER="rgba(69,71,90,200)",                        # Surface1
+    BORDER_SUBTLE="rgba(49,50,68,200)",                 # Surface0
+    BORDER_FOCUS="rgba(137,180,250,160)",
+    DIALOG_BG="#181825",                                # Mantle
+    TOOLTIP_BG="#313244",                               # Surface0
+    DROPDOWN_BG="#313244",
+    GRIDLINE="rgba(49,50,68,200)",
+    SELECTION="rgba(137,180,250,80)",
+    STAR="#f9e2af",                                     # Yellow
+    DANGER="#f38ba8", DANGER_DIM="rgba(243,139,168,25)", DANGER_HOVER="rgba(243,139,168,45)",
+    DANGER_BORDER="rgba(243,139,168,80)",               # Red
+    SUCCESS="#a6e3a1", SUCCESS_DIM="rgba(166,227,161,25)", SUCCESS_HOVER="rgba(166,227,161,45)",
+    SUCCESS_BORDER="rgba(166,227,161,80)",              # Green
+    WARNING="#f9e2af", INFO="#89dceb",                  # Yellow / Sky
+    OVERLAY="rgba(30,30,46,225)",
+    SHADOW_LIGHT="rgba(17,17,27,35)", SHADOW="rgba(17,17,27,55)", SHADOW_DEEP="rgba(17,17,27,75)",
+    TEXT_ON_ACCENT="#1e1e2e",                           # Base (dark on pastel blue)
+    SYNC_CYAN="#94e2d5", SYNC_PURPLE="#cba6f7",        # Teal / Mauve
+    SYNC_MAGENTA="#f5c2e7", SYNC_ORANGE="#fab387",     # Pink / Peach
+    SYNC_FREED="#94e2d5",
+)
+
+# ── Catppuccin Macchiato ──────────────────────────────────────────────────────
+_CATPPUCCIN_MACCHIATO = dict(
+    ACCENT="#8aadf4", ACCENT_LIGHT="#b7bdf8",          # Blue / Lavender
+    ACCENT_DIM="rgba(138,173,244,70)", ACCENT_HOVER="rgba(138,173,244,110)",
+    ACCENT_PRESS="rgba(138,173,244,55)", ACCENT_BORDER="rgba(138,173,244,90)",
+    ACCENT_MUTED="rgba(138,173,244,25)",
+    ACCENT_SOLID="rgba(138,173,244,200)", ACCENT_SOLID_PRESS="rgba(138,173,244,160)",
+    ACCENT_DARK="rgba(80,120,200,90)", ACCENT_DARK_DIM="rgba(80,120,200,55)",
+    BG_DARK="#24273a", BG_MID="#1e2030",               # Base / Mantle
+    SURFACE="rgba(54,58,79,60)",
+    SURFACE_ALT="#363a4f",                              # Surface0
+    SURFACE_RAISED="#494d64",                           # Surface1
+    SURFACE_HOVER="#5b6078",                            # Surface2
+    SURFACE_ACTIVE="rgba(91,96,120,220)",
+    MENU_BG="#363a4f",
+    TEXT_PRIMARY="#cad3f5",
+    TEXT_SECONDARY="#b8c0e0",
+    TEXT_TERTIARY="#a5adcb",
+    TEXT_DISABLED="#6e738d",                            # Overlay0
+    BORDER="rgba(73,77,100,200)",
+    BORDER_SUBTLE="rgba(54,58,79,200)",
+    BORDER_FOCUS="rgba(138,173,244,160)",
+    DIALOG_BG="#1e2030",
+    TOOLTIP_BG="#363a4f",
+    DROPDOWN_BG="#363a4f",
+    GRIDLINE="rgba(54,58,79,200)",
+    SELECTION="rgba(138,173,244,80)",
+    STAR="#eed49f",
+    DANGER="#ed8796", DANGER_DIM="rgba(237,135,150,25)", DANGER_HOVER="rgba(237,135,150,45)",
+    DANGER_BORDER="rgba(237,135,150,80)",
+    SUCCESS="#a6da95", SUCCESS_DIM="rgba(166,218,149,25)", SUCCESS_HOVER="rgba(166,218,149,45)",
+    SUCCESS_BORDER="rgba(166,218,149,80)",
+    WARNING="#eed49f", INFO="#91d7e3",                  # Yellow / Sky
+    OVERLAY="rgba(36,39,58,225)",
+    SHADOW_LIGHT="rgba(24,25,38,35)", SHADOW="rgba(24,25,38,55)", SHADOW_DEEP="rgba(24,25,38,75)",
+    TEXT_ON_ACCENT="#24273a",
+    SYNC_CYAN="#8bd5ca", SYNC_PURPLE="#c6a0f6",
+    SYNC_MAGENTA="#f5bde6", SYNC_ORANGE="#f5a97f",
+    SYNC_FREED="#8bd5ca",
+)
+
+# ── Catppuccin Frappé ─────────────────────────────────────────────────────────
+_CATPPUCCIN_FRAPPE = dict(
+    ACCENT="#8caaee", ACCENT_LIGHT="#babbf1",          # Blue / Lavender
+    ACCENT_DIM="rgba(140,170,238,70)", ACCENT_HOVER="rgba(140,170,238,110)",
+    ACCENT_PRESS="rgba(140,170,238,55)", ACCENT_BORDER="rgba(140,170,238,90)",
+    ACCENT_MUTED="rgba(140,170,238,25)",
+    ACCENT_SOLID="rgba(140,170,238,200)", ACCENT_SOLID_PRESS="rgba(140,170,238,160)",
+    ACCENT_DARK="rgba(80,115,190,90)", ACCENT_DARK_DIM="rgba(80,115,190,55)",
+    BG_DARK="#303446", BG_MID="#292c3c",               # Base / Mantle
+    SURFACE="rgba(65,69,89,60)",
+    SURFACE_ALT="#414559",                              # Surface0
+    SURFACE_RAISED="#51576d",                           # Surface1
+    SURFACE_HOVER="#626880",                            # Surface2
+    SURFACE_ACTIVE="rgba(98,104,128,220)",
+    MENU_BG="#414559",
+    TEXT_PRIMARY="#c6d0f5",
+    TEXT_SECONDARY="#b5bfe2",
+    TEXT_TERTIARY="#a5adce",
+    TEXT_DISABLED="#737994",                            # Overlay0
+    BORDER="rgba(81,87,109,200)",
+    BORDER_SUBTLE="rgba(65,69,89,200)",
+    BORDER_FOCUS="rgba(140,170,238,160)",
+    DIALOG_BG="#292c3c",
+    TOOLTIP_BG="#414559",
+    DROPDOWN_BG="#414559",
+    GRIDLINE="rgba(65,69,89,200)",
+    SELECTION="rgba(140,170,238,80)",
+    STAR="#e5c890",
+    DANGER="#e78284", DANGER_DIM="rgba(231,130,132,25)", DANGER_HOVER="rgba(231,130,132,45)",
+    DANGER_BORDER="rgba(231,130,132,80)",
+    SUCCESS="#a6d189", SUCCESS_DIM="rgba(166,209,137,25)", SUCCESS_HOVER="rgba(166,209,137,45)",
+    SUCCESS_BORDER="rgba(166,209,137,80)",
+    WARNING="#e5c890", INFO="#99d1db",
+    OVERLAY="rgba(48,52,70,225)",
+    SHADOW_LIGHT="rgba(35,38,52,35)", SHADOW="rgba(35,38,52,55)", SHADOW_DEEP="rgba(35,38,52,75)",
+    TEXT_ON_ACCENT="#303446",
+    SYNC_CYAN="#81c8be", SYNC_PURPLE="#ca9ee6",
+    SYNC_MAGENTA="#f4b8e4", SYNC_ORANGE="#ef9f76",
+    SYNC_FREED="#81c8be",
+)
+
+# ── Catppuccin Latte (light) ──────────────────────────────────────────────────
+_CATPPUCCIN_LATTE = dict(
+    ACCENT="#1e66f5", ACCENT_LIGHT="#7287fd",          # Blue / Lavender
+    ACCENT_DIM="rgba(30,102,245,60)", ACCENT_HOVER="rgba(30,102,245,100)",
+    ACCENT_PRESS="rgba(30,102,245,45)", ACCENT_BORDER="rgba(30,102,245,80)",
+    ACCENT_MUTED="rgba(30,102,245,18)",
+    ACCENT_SOLID="rgba(30,102,245,180)", ACCENT_SOLID_PRESS="rgba(30,102,245,140)",
+    ACCENT_DARK="rgba(20,80,200,80)", ACCENT_DARK_DIM="rgba(20,80,200,50)",
+    BG_DARK="#eff1f5", BG_MID="#e6e9ef",               # Base / Mantle
+    SURFACE="rgba(204,208,218,60)",
+    SURFACE_ALT="#ccd0da",                              # Surface0
+    SURFACE_RAISED="#bcc0cc",                           # Surface1
+    SURFACE_HOVER="#acb0be",                            # Surface2
+    SURFACE_ACTIVE="rgba(172,176,190,220)",
+    MENU_BG="#eff1f5",
+    TEXT_PRIMARY="#4c4f69",                             # Text
+    TEXT_SECONDARY="#5c5f77",                           # Subtext1
+    TEXT_TERTIARY="#6c6f85",                            # Subtext0
+    TEXT_DISABLED="#9ca0b0",                            # Overlay0
+    BORDER="rgba(172,176,190,200)",                     # Surface2
+    BORDER_SUBTLE="rgba(204,208,218,200)",              # Surface0
+    BORDER_FOCUS="rgba(30,102,245,130)",
+    DIALOG_BG="#eff1f5",
+    TOOLTIP_BG="#e6e9ef",
+    DROPDOWN_BG="#eff1f5",
+    GRIDLINE="rgba(188,192,204,200)",
+    SELECTION="rgba(30,102,245,70)",
+    STAR="#df8e1d",                                     # Yellow
+    DANGER="#d20f39", DANGER_DIM="rgba(210,15,57,20)", DANGER_HOVER="rgba(210,15,57,35)",
+    DANGER_BORDER="rgba(210,15,57,60)",                 # Red
+    SUCCESS="#40a02b", SUCCESS_DIM="rgba(64,160,43,25)", SUCCESS_HOVER="rgba(64,160,43,40)",
+    SUCCESS_BORDER="rgba(64,160,43,60)",               # Green
+    WARNING="#df8e1d", INFO="#04a5e5",                  # Yellow / Sky
+    OVERLAY="rgba(239,241,245,230)",
+    SHADOW_LIGHT="rgba(0,0,0,12)", SHADOW="rgba(0,0,0,20)", SHADOW_DEEP="rgba(0,0,0,30)",
+    TEXT_ON_ACCENT="#eff1f5",                           # Base (light on dark blue)
+    SYNC_CYAN="#179299", SYNC_PURPLE="#8839ef",        # Teal / Mauve
+    SYNC_MAGENTA="#ea76cb", SYNC_ORANGE="#fe640b",     # Pink / Peach
+    SYNC_FREED="#179299",
+)
+
+# Registry: theme-id → (palette_dict, is_dark)
+_THEME_REGISTRY: dict[str, tuple[dict, bool]] = {
+    "dark": (_DARK_PALETTE, True),
+    "light": (_LIGHT_PALETTE, False),
+    "catppuccin-mocha": (_CATPPUCCIN_MOCHA, True),
+    "catppuccin-macchiato": (_CATPPUCCIN_MACCHIATO, True),
+    "catppuccin-frappe": (_CATPPUCCIN_FRAPPE, True),
+    "catppuccin-latte": (_CATPPUCCIN_LATTE, False),
+}
+
+# Playlist / category colors per theme (r,g,b tuples used by TrackListTitleBar)
+_PLAYLIST_COLORS: dict[str, dict] = {
+    "dark": dict(
+        PLAYLIST_SMART=(128, 90, 213), PLAYLIST_PODCAST=(46, 160, 67),
+        PLAYLIST_MASTER=(100, 100, 120), PLAYLIST_REGULAR=(64, 156, 255),
+    ),
+    "light": dict(
+        PLAYLIST_SMART=(114, 72, 200), PLAYLIST_PODCAST=(38, 135, 55),
+        PLAYLIST_MASTER=(90, 90, 110), PLAYLIST_REGULAR=(10, 111, 219),
+    ),
+    "catppuccin-mocha": dict(
+        PLAYLIST_SMART=(203, 166, 247), PLAYLIST_PODCAST=(166, 227, 161),
+        PLAYLIST_MASTER=(88, 91, 112), PLAYLIST_REGULAR=(137, 180, 250),
+    ),
+    "catppuccin-macchiato": dict(
+        PLAYLIST_SMART=(198, 160, 246), PLAYLIST_PODCAST=(166, 218, 149),
+        PLAYLIST_MASTER=(91, 96, 120), PLAYLIST_REGULAR=(138, 173, 244),
+    ),
+    "catppuccin-frappe": dict(
+        PLAYLIST_SMART=(202, 158, 230), PLAYLIST_PODCAST=(166, 209, 137),
+        PLAYLIST_MASTER=(98, 104, 128), PLAYLIST_REGULAR=(140, 170, 238),
+    ),
+    "catppuccin-latte": dict(
+        PLAYLIST_SMART=(136, 57, 239), PLAYLIST_PODCAST=(64, 160, 43),
+        PLAYLIST_MASTER=(140, 143, 161), PLAYLIST_REGULAR=(30, 102, 245),
+    ),
+}
 
 
 class Colors:
@@ -211,8 +422,11 @@ class Colors:
     PLAYLIST_MASTER: tuple[int, int, int] = (100, 100, 120)
     PLAYLIST_REGULAR: tuple[int, int, int] = (64, 156, 255)
 
-    # Sync storage legend color (teal — distinct from SYNC_CYAN)
-    SYNC_FREED = "#66d9c2"
+    # Sync storage legend color — theme-aware, initialised from dark palette
+    SYNC_FREED = _DARK_PALETTE["SYNC_FREED"]
+
+    # Active theme identifier (set by apply_theme)
+    _active_theme: str = "dark"
 
     @classmethod
     def _detect_system_dark(cls) -> bool:
@@ -261,35 +475,59 @@ class Colors:
         Parameters
         ----------
         theme : str
-            ``"dark"``, ``"light"``, or ``"system"``
+            ``"dark"``, ``"light"``, ``"system"``, or any ``"catppuccin-*"`` key.
         high_contrast : str
-            ``"on"``, ``"off"``, or ``"system"``
+            ``"on"``, ``"off"``, or ``"system"`` (ignored for Catppuccin flavors)
         """
-        # Resolve mode
+        # Resolve system theme
         if theme == "system":
-            is_dark = cls._detect_system_dark()
+            effective = "dark" if cls._detect_system_dark() else "light"
         else:
-            is_dark = (theme != "light")
+            effective = theme
 
-        # Resolve contrast
+        palette_entry = _THEME_REGISTRY.get(effective, _THEME_REGISTRY["dark"])
+        base_palette, is_dark = palette_entry
+        is_catppuccin = effective.startswith("catppuccin-")
+
+        # Resolve contrast (ignored for Catppuccin — they have their own contrast ratios)
         if high_contrast == "system":
             hc = cls._detect_system_hc()
         else:
             hc = (high_contrast == "on")
 
         cls._active_mode = "dark" if is_dark else "light"
+        cls._active_theme = effective
         cls._active_hc = hc
 
-        # Start with base palette
-        palette = dict(_DARK_PALETTE if is_dark else _LIGHT_PALETTE)
+        # Build resolved palette, optionally merging HC overrides
+        resolved = dict(base_palette)
+        if hc and not is_catppuccin:
+            resolved.update(_HC_DARK_OVERRIDES if is_dark else _HC_LIGHT_OVERRIDES)
 
-        # Merge HC overrides if enabled
-        if hc:
-            palette.update(_HC_DARK_OVERRIDES if is_dark else _HC_LIGHT_OVERRIDES)
-
-        # Apply all values to class attributes
-        for key, value in palette.items():
+        # Apply all palette values to class attributes
+        for key, value in resolved.items():
             setattr(cls, key, value)
+
+        # Apply per-theme playlist/category colors
+        pc = _PLAYLIST_COLORS.get(effective, _PLAYLIST_COLORS["dark"])
+        cls.PLAYLIST_SMART = pc["PLAYLIST_SMART"]
+        cls.PLAYLIST_PODCAST = pc["PLAYLIST_PODCAST"]
+        cls.PLAYLIST_MASTER = pc["PLAYLIST_MASTER"]
+        cls.PLAYLIST_REGULAR = pc["PLAYLIST_REGULAR"]
+
+
+def _parse_color(css: str) -> QColor:
+    """Parse a CSS color string (hex or ``rgba(r,g,b,a)``) into a QColor."""
+    c = QColor(css)
+    if c.isValid():
+        return c
+    import re
+    m = re.match(r'rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?\s*\)', css.strip())
+    if m:
+        r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        a = int(m.group(4)) if m.group(4) else 255
+        return QColor(r, g, b, a)
+    return QColor("white" if Colors._active_mode == "dark" else "black")
 
 
 def build_palette() -> QPalette:
@@ -298,7 +536,7 @@ def build_palette() -> QPalette:
     bg = QColor(Colors.BG_DARK)
     base = QColor(Colors.BG_DARK).darker(110) if Colors._active_mode == "dark" else QColor(Colors.BG_DARK).lighter(105)
     alt = QColor(Colors.BG_MID)
-    text = QColor("white") if Colors._active_mode == "dark" else QColor("black")
+    text = _parse_color(Colors.TEXT_PRIMARY)
     accent = QColor(Colors.ACCENT)
     pal.setColor(QPalette.ColorRole.Window, bg)
     pal.setColor(QPalette.ColorRole.WindowText, text)
@@ -679,6 +917,8 @@ def btn_css(
     border: str = "none",
     radius: int | None = None,
     padding: str | None = None,
+    bg_disabled: str | None = None,
+    fg_disabled: str | None = None,
     extra: str = "",
 ) -> str:
     """Standard button stylesheet."""
@@ -694,6 +934,8 @@ def btn_css(
         radius = Metrics.BORDER_RADIUS_SM
     if padding is None:
         padding = f"{Metrics.BTN_PADDING_V}px {Metrics.BTN_PADDING_H}px"
+    _d_bg = bg_disabled if bg_disabled is not None else Colors.SURFACE
+    _d_fg = fg_disabled if fg_disabled is not None else Colors.TEXT_DISABLED
     return f"""
         QPushButton {{
             background: {bg};
@@ -709,6 +951,11 @@ def btn_css(
         QPushButton:pressed {{
             background: {bg_press};
         }}
+        QPushButton:disabled {{
+            background: {_d_bg};
+            color: {_d_fg};
+            border-color: {Colors.BORDER_SUBTLE};
+        }}
     """
 
 
@@ -721,6 +968,8 @@ def accent_btn_css() -> str:
         fg=Colors.TEXT_ON_ACCENT,
         border=f"1px solid {Colors.ACCENT_BORDER}",
         padding=f"{Metrics.BTN_PADDING_V + 1}px {Metrics.BTN_PADDING_H + 2}px",
+        bg_disabled=Colors.SURFACE,
+        fg_disabled=Colors.TEXT_DISABLED,
     )
 
 
@@ -732,7 +981,101 @@ def danger_btn_css() -> str:
         bg_press=Colors.DANGER_HOVER,
         fg=Colors.DANGER,
         border=f"1px solid {Colors.DANGER_BORDER}",
+        bg_disabled=Colors.SURFACE,
+        fg_disabled=Colors.TEXT_DISABLED,
     )
+
+
+def input_css(radius: int | None = None, padding: str | None = None) -> str:
+    """Standard input field stylesheet for QLineEdit / QTextEdit."""
+    if radius is None:
+        radius = Metrics.BORDER_RADIUS_SM
+    if padding is None:
+        padding = f"5px {Metrics.BTN_PADDING_H - 2}px"
+    return f"""
+        QLineEdit, QTextEdit, QPlainTextEdit {{
+            background: {Colors.SURFACE_ALT};
+            border: 1px solid {Colors.BORDER};
+            border-radius: {radius}px;
+            color: {Colors.TEXT_PRIMARY};
+            padding: {padding};
+        }}
+        QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {{
+            border: 1px solid {Colors.BORDER_FOCUS};
+            background: {Colors.SURFACE_RAISED};
+        }}
+        QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {{
+            background: {Colors.SURFACE};
+            color: {Colors.TEXT_DISABLED};
+            border-color: {Colors.BORDER_SUBTLE};
+        }}
+    """
+
+
+def combo_css(radius: int | None = None, padding: str | None = None) -> str:
+    """Standard combo box stylesheet for QComboBox."""
+    if radius is None:
+        radius = Metrics.BORDER_RADIUS_SM
+    if padding is None:
+        padding = f"5px {(10)}px"
+    return f"""
+        QComboBox {{
+            background: {Colors.SURFACE_RAISED};
+            border: 1px solid {Colors.BORDER};
+            border-radius: {radius}px;
+            color: {Colors.TEXT_PRIMARY};
+            padding: {padding};
+        }}
+        QComboBox:hover {{
+            border: 1px solid {Colors.BORDER_FOCUS};
+        }}
+        QComboBox:focus {{
+            border: 1px solid {Colors.BORDER_FOCUS};
+        }}
+        QComboBox::drop-down {{
+            border: none;
+            width: {(22)}px;
+        }}
+        QComboBox::down-arrow {{
+            image: none;
+            border: none;
+        }}
+        QComboBox QAbstractItemView {{
+            background: {Colors.DROPDOWN_BG};
+            color: {Colors.TEXT_PRIMARY};
+            selection-background-color: {Colors.ACCENT_DIM};
+            selection-color: {Colors.TEXT_PRIMARY};
+            border: 1px solid {Colors.BORDER};
+            border-radius: 4px;
+            padding: 2px;
+            outline: none;
+        }}
+        QComboBox:disabled {{
+            background: {Colors.SURFACE};
+            color: {Colors.TEXT_DISABLED};
+            border-color: {Colors.BORDER_SUBTLE};
+        }}
+    """
+
+
+def link_btn_css() -> str:
+    """Transparent text-link button (no background, accent-colored text)."""
+    return f"""
+        QPushButton {{
+            background: transparent;
+            border: none;
+            color: {Colors.ACCENT};
+            padding: 0;
+            text-align: left;
+        }}
+        QPushButton:hover {{
+            color: {Colors.ACCENT_LIGHT};
+            text-decoration: underline;
+        }}
+        QPushButton:pressed {{
+            color: {Colors.ACCENT};
+        }}
+    """
 
 
 # ── Button style presets (functions — resolved at call time so scaling applies)
@@ -799,7 +1142,7 @@ def table_css() -> str:
             border: none;
             border-bottom: 1px solid {Colors.BORDER};
             font-weight: 600;
-            font-size: 11px;
+            font-size: {Metrics.FONT_LG}px;
         }}
         QHeaderView::section:hover {{
             background-color: {Colors.SURFACE_RAISED};
@@ -1065,5 +1408,111 @@ def app_stylesheet() -> str:
     QDialog {{
         background: {Colors.DIALOG_BG};
         color: {Colors.TEXT_PRIMARY};
+    }}
+
+    /* ── Input fields ───────────────────────────────────────────── */
+    QLineEdit {{
+        background: {Colors.SURFACE_ALT};
+        border: 1px solid {Colors.BORDER};
+        border-radius: {Metrics.BORDER_RADIUS_SM}px;
+        color: {Colors.TEXT_PRIMARY};
+        padding: 5px {Metrics.BTN_PADDING_H - 2}px;
+        selection-background-color: {Colors.ACCENT_DIM};
+    }}
+    QLineEdit:focus {{
+        border: 1px solid {Colors.BORDER_FOCUS};
+        background: {Colors.SURFACE_RAISED};
+    }}
+    QLineEdit:disabled {{
+        background: {Colors.SURFACE};
+        color: {Colors.TEXT_DISABLED};
+        border-color: {Colors.BORDER_SUBTLE};
+    }}
+
+    /* ── Combo box ──────────────────────────────────────────────── */
+    QComboBox {{
+        background: {Colors.SURFACE_RAISED};
+        border: 1px solid {Colors.BORDER};
+        border-radius: {Metrics.BORDER_RADIUS_SM}px;
+        color: {Colors.TEXT_PRIMARY};
+        padding: 5px {(10)}px;
+    }}
+    QComboBox:hover {{
+        border: 1px solid {Colors.BORDER_FOCUS};
+    }}
+    QComboBox:focus {{
+        border: 1px solid {Colors.BORDER_FOCUS};
+    }}
+    QComboBox::drop-down {{
+        border: none;
+        width: {(22)}px;
+    }}
+    QComboBox::down-arrow {{
+        image: none;
+        border: none;
+    }}
+    QComboBox QAbstractItemView {{
+        background: {Colors.DROPDOWN_BG};
+        color: {Colors.TEXT_PRIMARY};
+        selection-background-color: {Colors.ACCENT_DIM};
+        selection-color: {Colors.TEXT_PRIMARY};
+        border: 1px solid {Colors.BORDER};
+        border-radius: {Metrics.BORDER_RADIUS_SM}px;
+        padding: 2px;
+        outline: none;
+    }}
+    QComboBox:disabled {{
+        background: {Colors.SURFACE};
+        color: {Colors.TEXT_DISABLED};
+        border-color: {Colors.BORDER_SUBTLE};
+    }}
+
+    /* ── Spin box ───────────────────────────────────────────────── */
+    QSpinBox, QDoubleSpinBox {{
+        background: {Colors.SURFACE_ALT};
+        border: 1px solid {Colors.BORDER};
+        border-radius: {Metrics.BORDER_RADIUS_SM}px;
+        color: {Colors.TEXT_PRIMARY};
+        padding: 4px 6px;
+    }}
+    QSpinBox:focus, QDoubleSpinBox:focus {{
+        border: 1px solid {Colors.BORDER_FOCUS};
+        background: {Colors.SURFACE_RAISED};
+    }}
+    QSpinBox::up-button, QSpinBox::down-button,
+    QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+        border: none;
+        background: transparent;
+        width: {(16)}px;
+    }}
+
+    /* ── Checkbox ───────────────────────────────────────────────── */
+    QCheckBox {{
+        color: {Colors.TEXT_PRIMARY};
+        background: transparent;
+        spacing: 6px;
+    }}
+    QCheckBox::indicator {{
+        width: {(16)}px;
+        height: {(16)}px;
+        border-radius: {(4)}px;
+        border: 1px solid {Colors.BORDER};
+        background: {Colors.SURFACE_ALT};
+    }}
+    QCheckBox::indicator:hover {{
+        border-color: {Colors.BORDER_FOCUS};
+        background: {Colors.SURFACE_HOVER};
+    }}
+    QCheckBox::indicator:checked {{
+        background: {Colors.ACCENT};
+        border-color: {Colors.ACCENT};
+    }}
+    QCheckBox::indicator:checked:hover {{
+        background: {Colors.ACCENT_HOVER};
+        border-color: {Colors.ACCENT_HOVER};
+    }}
+    QCheckBox::indicator:disabled {{
+        background: {Colors.SURFACE};
+        border-color: {Colors.BORDER_SUBTLE};
     }}
 """

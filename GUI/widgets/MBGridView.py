@@ -195,6 +195,13 @@ class MusicBrowserGrid(QFrame):
 
             self._flow.addWidget(gridItem)
 
+        # Update minimum height so the scroll area can size correctly.
+        # Without this, items added while the viewport is hidden or 0-width
+        # can all end up at (0, 0).
+        w = self.width()
+        if w > 0:
+            self.setMinimumHeight(self._flow.heightForWidth(w))
+
         if self.pendingItems and load_id == self._load_id:
             QTimer.singleShot(8, lambda: self._addNextItem(load_id))
         else:
@@ -227,3 +234,20 @@ class MusicBrowserGrid(QFrame):
 
     def resizeEvent(self, a0):
         super().resizeEvent(a0)
+        # Explicitly set minimum height from the flow layout's heightForWidth
+        # so the scroll area knows the correct content height.  QScrollArea's
+        # built-in heightForWidth propagation is unreliable when items are
+        # added incrementally via QTimer while the widget is hidden or the
+        # viewport hasn't settled yet.
+        w = a0.size().width() if a0 else self.width()
+        if w > 0 and self._flow.count():
+            self.setMinimumHeight(self._flow.heightForWidth(w))
+
+    def showEvent(self, a0):
+        super().showEvent(a0)
+        # When the widget becomes visible (e.g. stacked-widget page switch),
+        # force the layout to recalculate — items may have been added while
+        # hidden (width=0), leaving them all at position (0, 0).
+        if self.width() > 0 and self._flow.count():
+            self._flow.activate()
+            self.setMinimumHeight(self._flow.heightForWidth(self.width()))
