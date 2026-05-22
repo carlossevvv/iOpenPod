@@ -143,11 +143,23 @@ class PodcastFeed:
     """Maximum number of episodes to keep on the iPod for this feed."""
 
     fill_mode: str = "newest"
-    """How to fill available episode slots.
+    """How to populate this feed's slots on the iPod.
 
-    ``"newest"``  — always pick the most recently published episode.
-    ``"next"``    — pick the next unheard episode (oldest on iPod + 1;
-                    if none on iPod, pick the oldest retrieved episode).
+    ``"newest"``         — when a slot opens (via clear rules), fill it with
+                           the most recently published episode. Does NOT
+                           rotate existing slot occupants out for newer
+                           ones; an unlistened young episode keeps its slot
+                           even when newer episodes are published.
+    ``"next"``           — when a slot opens, fill it with the next unheard
+                           episode after the newest already on iPod (oldest
+                           retrieved if none on iPod).
+    ``"always_newest"``  — actively keep the newest ``episode_slots``
+                           episodes on the iPod. In addition to the normal
+                           clear rules, rotates older slot occupants out
+                           when newer episodes become available (uses RSS
+                           ``pub_date`` to compare).
+
+    Unknown values fall back to ``"newest"`` behavior at plan time.
     """
 
     clear_when_listened: bool = True

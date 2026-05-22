@@ -1612,7 +1612,9 @@ class PodcastBrowser(QFrame):
         self._feed_episode_slots.setFont(QFont(FONT_FAMILY, Metrics.FONT_SM))
         self._feed_episode_slots.setStyleSheet(_spin_style)
 
-        self._feed_fill_mode = _make_setting_combo(["Newest Episode", "Next Episode"])
+        self._feed_fill_mode = _make_setting_combo(
+            ["Newest Episode", "Next Episode", "Always Newest"]
+        )
         self._feed_clear_method = _make_setting_combo(
             ["Remove Immediately", "Mark for Replacement"], width=140)
         self._feed_clear_listened = _make_setting_combo(["Yes", "No"], width=70)
@@ -2647,7 +2649,11 @@ class PodcastBrowser(QFrame):
         if feed is not None:
             self._feed_episode_slots.setValue(feed.episode_slots)
 
-            _fill_display = {"newest": "Newest Episode", "next": "Next Episode"}
+            _fill_display = {
+                "newest": "Newest Episode",
+                "next": "Next Episode",
+                "always_newest": "Always Newest",
+            }
             idx = self._feed_fill_mode.findText(
                 _fill_display.get(feed.fill_mode, "Newest Episode"),
             )
@@ -2703,7 +2709,11 @@ class PodcastBrowser(QFrame):
 
         feed = self._selected_feed
 
-        _fill_keys = {"Newest Episode": "newest", "Next Episode": "next"}
+        _fill_keys = {
+            "Newest Episode": "newest",
+            "Next Episode": "next",
+            "Always Newest": "always_newest",
+        }
         _cl_keys = {"Yes": True, "No": False}
         _older_keys = {
             "1 Day": "1_day", "3 Days": "3_days",
