@@ -174,6 +174,10 @@ def test_writer_logs_actual_filesystem_and_preserved_platform_mismatch(
 ) -> None:
     create_virtual_ipod(tmp_path, "MA005")
     itunes_dir = tmp_path / "iPod_Control" / "iTunes"
+    existing_db = itunes_dir / "iTunesDB"
+    existing = bytearray(existing_db.read_bytes())
+    struct.pack_into("<H", existing, 0x20, 2)
+    existing_db.write_bytes(existing)
     predictable_temps = [
         itunes_dir / "iTunesDB.tmp",
         itunes_dir / "iTunesDB.backup.tmp",

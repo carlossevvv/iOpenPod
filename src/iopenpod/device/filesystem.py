@@ -12,6 +12,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import macos_volume
+
 logger = logging.getLogger(__name__)
 
 ITUNESDB_PLATFORM_MAC = 1
@@ -138,6 +140,11 @@ def _detect_linux_filesystem(mount_path: str) -> str:
 
 
 def _detect_macos_filesystem(mount_path: str) -> str:
+    kernel = macos_volume.read_mounted_volume(mount_path)
+    if kernel is not None:
+        value = _normalize_filesystem_type(kernel.filesystem_type)
+        if value:
+            return value
     try:
         proc = subprocess.run(
             ["diskutil", "info", "-plist", mount_path],

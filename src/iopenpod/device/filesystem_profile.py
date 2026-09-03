@@ -19,6 +19,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol, cast
 
+from . import macos_volume
 from .filesystem import detect_filesystem_type
 
 _LINUX_MOUNTINFO = Path("/proc/self/mountinfo")
@@ -322,6 +323,40 @@ def _inspect_linux(requested_path: str) -> _MountedFilesystemFacts:
 
 
 def _inspect_macos(requested_path: str) -> _MountedFilesystemFacts:
+    """Describe the volume from the kernel; ask Disk Arbitration only for gaps.
+
+    ``diskutil info`` blocks behind writes already in flight to the same
+    volume, and on a slow iPod that outlasts the 5 second timeout below.  The
+    sync path revalidates before every copy, so it must not depend on it.
+    """
+    kernel = macos_volume.read_mounted_volume(requested_path)
+    if kernel is None:
+        return _inspect_macos_with_diskutil(requested_path)
+    volume_id = kernel.volume_uuid
+    errors: tuple[str, ...] = ()
+    if not volume_id:
+        # The filesystem reports no UUID; Disk Arbitration may still derive one.
+        fallback = _inspect_macos_with_diskutil(requested_path)
+        volume_id = fallback.identity.volume_id
+        errors = fallback.errors
+    return _MountedFilesystemFacts(
+        mount_path=os.path.realpath(kernel.mount_path),
+        filesystem_type=kernel.filesystem_type,
+        mount_source=kernel.device_node,
+        mount_options=kernel.mount_options,
+        read_only=kernel.read_only,
+        allocation_unit_size=_positive_int(kernel.block_size),
+        identity=VolumeIdentity(
+            operating_system="macos",
+            device_id=kernel.device_id,
+            volume_id=volume_id,
+            mount_instance=kernel.device_id,
+        ),
+        errors=errors,
+    )
+
+
+def _inspect_macos_with_diskutil(requested_path: str) -> _MountedFilesystemFacts:
     try:
         proc = subprocess.run(
             ["diskutil", "info", "-plist", requested_path],

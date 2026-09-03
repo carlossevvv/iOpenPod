@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 import plistlib
+import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from iopenpod.device import filesystem_profile
+from iopenpod.device import filesystem_profile, macos_volume
 
 
 def _linux_mountinfo_line(
@@ -253,6 +255,7 @@ def test_macos_profile_uses_diskutil_volume_identity_and_format(
         return SimpleNamespace(returncode=0, stdout=plistlib.dumps(disk_info), stderr=b"")
 
     monkeypatch.setattr(filesystem_profile.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_volume, "read_mounted_volume", lambda _path: None)
     monkeypatch.setattr(filesystem_profile.subprocess, "run", fake_run)
     monkeypatch.setattr(filesystem_profile.os, "pathconf", lambda *_args: 255, raising=False)
 
@@ -430,3 +433,77 @@ def test_profile_fails_closed_when_mount_identity_cannot_be_detected(
     assert profile.safe_for_writes is False
     assert profile.identity.is_complete is False
     assert any("mount table" in error.casefold() for error in profile.detection_errors)
+
+
+def _kernel_volume_facts(mount_path: Path) -> macos_volume.MacOSVolumeFacts:
+    return macos_volume.MacOSVolumeFacts(
+        mount_path=os.path.realpath(mount_path),
+        device_node="/dev/disk4s2",
+        filesystem_type="hfs",
+        read_only=False,
+        mount_options=("nosuid", "nodev", "local", "noowners", "journaled"),
+        block_size=16384,
+        volume_uuid="ED309777-33BD-3935-B36F-85F326FBB8EE",
+    )
+
+
+def _busy_diskutil(commands: list[list[str]]):
+    """Mimic ``diskutil info`` stalling behind in-flight writes to the volume."""
+
+    def fake_run(args, **kwargs):
+        commands.append(args)
+        raise subprocess.TimeoutExpired(args, kwargs.get("timeout", 5))
+
+    return fake_run
+
+
+def test_macos_revalidation_uses_kernel_volume_facts_when_diskutil_stalls(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(filesystem_profile.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_volume, "read_mounted_volume", lambda _path: _kernel_volume_facts(tmp_path))
+    monkeypatch.setattr(filesystem_profile.subprocess, "run", _busy_diskutil(commands))
+    monkeypatch.setattr(filesystem_profile.os, "pathconf", lambda *_args: 255, raising=False)
+
+    retained = filesystem_profile.inspect_filesystem_profile(tmp_path, reported_volume_format="HFSPLUS")
+    result = filesystem_profile.revalidate_filesystem_profile(retained)
+
+    assert commands == []
+    assert result.safe_to_continue, result.reason
+    assert result.current_identity == filesystem_profile.VolumeIdentity(
+        operating_system="macos",
+        device_id="disk4s2",
+        volume_id="ED309777-33BD-3935-B36F-85F326FBB8EE",
+        mount_instance="disk4s2",
+    )
+    assert retained.filesystem_type == "hfs"
+    assert retained.mount_source == "/dev/disk4s2"
+    assert retained.mount_options == ("nosuid", "nodev", "local", "noowners", "journaled")
+    assert retained.allocation_unit_size == 16384
+    assert retained.safe_for_writes is True
+
+
+def test_macos_profile_asks_diskutil_only_for_a_missing_volume_uuid(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    facts = replace(_kernel_volume_facts(tmp_path), volume_uuid="")
+    disk_info = {"DeviceIdentifier": "disk4s2", "VolumeUUID": "90C5CF3C-6734-4C25-867B-AF4EE52911CC"}
+    commands: list[list[str]] = []
+
+    def fake_run(args, **_kwargs):
+        commands.append(args)
+        return SimpleNamespace(returncode=0, stdout=plistlib.dumps(disk_info), stderr=b"")
+
+    monkeypatch.setattr(filesystem_profile.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_volume, "read_mounted_volume", lambda _path: facts)
+    monkeypatch.setattr(filesystem_profile.subprocess, "run", fake_run)
+    monkeypatch.setattr(filesystem_profile.os, "pathconf", lambda *_args: 255, raising=False)
+
+    profile = filesystem_profile.inspect_filesystem_profile(tmp_path)
+
+    assert len(commands) == 1
+    assert profile.filesystem_type == "hfs"
+    assert profile.identity.volume_id == "90C5CF3C-6734-4C25-867B-AF4EE52911CC"
